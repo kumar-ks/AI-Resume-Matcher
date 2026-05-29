@@ -29,7 +29,26 @@ cd AI-Resume-Matcher
 pip install -r requirements.txt
 ```
 
-### 2. Place your files
+### 2. Install Ollama (for local LLM)
+
+Ollama runs LLMs locally — no API keys, no data leaves your machine.
+
+```bash
+# macOS (via Homebrew)
+brew install ollama
+
+# Or download from: https://ollama.com/download
+```
+
+Then pull the model (one-time download, ~4.7 GB):
+
+```bash
+ollama pull llama3
+```
+
+> **Note:** The script auto-starts Ollama if it's not running. You don't need to manually run `ollama serve` — the framework handles it automatically.
+
+### 3. Place your files
 
 ```
 AI-Resume-Matcher/
@@ -44,16 +63,16 @@ AI-Resume-Matcher/
 
 **Supported formats:** PDF, DOCX, TXT
 
-### 3. Run
+### 4. Run
 
 ```bash
-# Basic (uses Ollama local LLM)
+# Basic (uses Ollama local LLM — auto-starts Ollama if not running)
 python run.py --model ollama/llama3
 
 # With specific JD file
 python run.py --jd ./jd/senior_backend.pdf --model ollama/llama3
 
-# With OpenAI GPT-4
+# With OpenAI GPT-4 (requires OPENAI_API_KEY env var)
 python run.py --model gpt-4
 
 # Show only top 5 candidates
@@ -65,6 +84,14 @@ python run.py --model ollama/llama3 --output results.json
 # Enable debug logging (verbose internal state)
 python run.py --model ollama/llama3 --debug
 ```
+
+### What happens when you run the script
+
+1. **Ollama auto-start** — If using an `ollama/*` model and the server isn't running, the script starts it automatically in the background.
+2. **Model check** — If the required model isn't downloaded yet, it pulls it automatically (first run only).
+3. **File loading** — Reads JD and resumes from the specified folders.
+4. **Pipeline execution** — Runs the 6-stage matching pipeline.
+5. **Results display** — Shows ranked candidates with scores and recommendations.
 
 ---
 
@@ -526,12 +553,15 @@ AI-Resume-Matcher/
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | JD shows 0 characters | Scanned/image-based PDF | Install OCR: `brew install tesseract poppler && pip install pytesseract pdf2image` |
-| All scores are identical | JD text is empty (extraction failed) | Check JD file format, convert to DOCX/TXT if needed |
-| SSL certificate errors | Corporate proxy (Zscaler) | Set `export LITELLM_LOCAL_MODEL_COST_MAP=True` |
+| All scores are identical (78.6%) | Ollama not running OR JD text empty | The script now auto-starts Ollama. If still failing, check JD file format. |
+| SSL certificate errors | Corporate proxy (Zscaler) | Handled automatically (`LITELLM_LOCAL_MODEL_COST_MAP=True` is set by the script) |
 | Embedding model fails | SSL blocks HuggingFace download | The framework auto-patches httpx SSL; if still failing, download model manually |
 | LLM returns empty/bad JSON | Model too small for structured output | Use `ollama/llama3` or larger; the framework retries 3 times automatically |
 | DOCX shows minimal text | Content in text boxes/tables | Fixed: the framework extracts from paragraphs, tables, text boxes, hyperlinks, headers, and footers |
 | Name/email/phone missing | LLM failed to extract | Fixed: regex baseline always extracts contact info as fallback |
+| "SUMMAR Y" as name | OCR artifact with spaces | Fixed: section header detection normalizes spaces before matching |
+| Ollama not installed | Binary not found | Install: `brew install ollama` or download from https://ollama.com/download |
+| Model not found | Model not pulled yet | The script auto-pulls the model on first run, or manually: `ollama pull llama3` |
 
 ---
 

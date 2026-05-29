@@ -276,10 +276,16 @@ class ResumeUnderstanding:
                 continue
 
             # Skip lines that look like section headers/labels
-            if re.match(
-                r"^(summary|profile|resume|curriculum|objective|career|about|contact|experience|education)",
-                line,
-                re.IGNORECASE,
+            # Normalize spaces for OCR artifacts (e.g., "SUMMAR Y" → "SUMMARY")
+            normalized = re.sub(r"\s+", "", line).lower()
+            section_headers = {
+                "summary", "profile", "resume", "curriculum", "objective",
+                "career", "about", "contact", "experience", "education",
+                "skills", "certifications", "projects", "professional",
+                "references", "achievements", "highlights", "overview",
+            }
+            if normalized in section_headers or any(
+                normalized.startswith(h) for h in section_headers
             ):
                 logger.debug("  Line %d skipped (section header): %r", idx, line)
                 continue

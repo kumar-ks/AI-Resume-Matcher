@@ -27,7 +27,11 @@ DEPENDENCIES:
 import argparse
 import asyncio
 import logging
+import os
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from matching_engine.file_loader import extract_text, load_files_from_directory
@@ -70,6 +74,96 @@ def setup_logging(debug: bool = False) -> None:
         logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
         logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
         logging.getLogger("numexpr").setLevel(logging.WARNING)
+
+
+def ensure_ollama_running(model: str) -> None:
+    """
+    Check if Ollama is required and running. If not running, start it automatically.
+
+    Called by: main() before pipeline execution (only for ollama/* models).
+
+    Flow:
+        1. Check if the model uses Ollama (starts with "ollama/")
+        2. If not an Ollama model, skip (cloud APIs don't need Ollama)
+        3. Check if 'ollama' binary is installed on the system
+        4. Try connecting to Ollama server (ollama list)
+        5. If not running, start 'ollama serve' in the background
+        6. Wait up to 10 seconds for the server to become ready
+        7. Verify the required model is available locally
+
+    Args:
+        model: The LLM model identifier (e.g., "ollama/llama3", "gpt-4")
+    """
+    # Only needed for Ollama models
+    if not model.startswith("ollama/"):
+        logger.debug(f"Model '{model}' is not Ollama-based, skipping Ollama check")
+        return
+
+    # Check if ollama binary exists
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        print("\nERROR: Ollama is not installed.")
+        print("  Install from: https://ollama.com/download")
+        print("  Or use a cloud model: python run.py --model gpt-4")
+        sys.exit(1)
+
+    # Check if Ollama server is already running
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            logger.debug("Ollama server is already running")
+            # Verify the required model is available
+            model_name = model.replace("ollama/", "")
+            if model_name not in result.stdout:
+                print(f"\n  WARNING: Model '{model_name}' not found locally.")
+                print(f"  Pulling model (this may take a few minutes on first run)...")
+                subprocess.run(["ollama", "pull", model_name], check=False)
+            return
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    except Exception:
+        pass
+
+    # Ollama is not running — start it automatically
+    print("  Starting Ollama server...")
+    logger.info("Ollama not running, starting 'ollama serve' in background")
+
+    # Start ollama serve as a background process (detached from this script)
+    subprocess.Popen(
+        ["ollama", "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # Wait for the server to become ready (up to 10 seconds)
+    for i in range(10):
+        time.sleep(1)
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0:
+                logger.info(f"Ollama server started successfully (took {i+1}s)")
+                print(f"  Ollama server started (took {i+1}s)")
+
+                # Check if model is available
+                model_name = model.replace("ollama/", "")
+                if model_name not in result.stdout:
+                    print(f"  Pulling model '{model_name}' (first run may take a few minutes)...")
+                    subprocess.run(["ollama", "pull", model_name], check=False)
+                return
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+    # Failed to start after 10 seconds
+    print("\n  ERROR: Could not start Ollama server after 10 seconds.")
+    print("  Try starting it manually: ollama serve")
+    sys.exit(1)
 
 
 def parse_args():
@@ -364,10 +458,17 @@ def main():
     """
     Application entry point.
 
-    Flow: parse_args() → setup_logging() → asyncio.run(run_matching())
+    Flow: parse_args() → setup_logging() → ensure_ollama_running() → asyncio.run(run_matching())
     """
     args = parse_args()
     setup_logging(debug=args.debug)
+
+    # Auto-start Ollama if using an Ollama model and server isn't running
+    ensure_ollama_running(args.model)
+
+    # Set environment variable to skip remote model cost map fetch (avoids SSL issues)
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
     asyncio.run(run_matching(args))
 
 
