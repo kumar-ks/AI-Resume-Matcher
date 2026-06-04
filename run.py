@@ -34,8 +34,16 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 from matching_engine.file_loader import extract_text, load_files_from_directory
 from matching_engine.pipeline import MatchingPipeline
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG FILE PATH
+# Default: config.yaml in the project root. Override with --config flag.
+# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING CONFIGURATION
@@ -74,6 +82,30 @@ def setup_logging(debug: bool = False) -> None:
         logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
         logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
         logging.getLogger("numexpr").setLevel(logging.WARNING)
+
+
+def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
+    """
+    Load configuration from YAML file.
+
+    Called by: main()
+    Returns: dict with all config values (or empty dict if file not found)
+
+    The config file provides default values for all settings.
+    CLI arguments override config file values (CLI takes priority).
+    """
+    if not config_path.exists():
+        logger.debug(f"Config file not found at {config_path}, using defaults")
+        return {}
+
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f) or {}
+        logger.debug(f"Loaded config from {config_path}: {list(config.keys())}")
+        return config
+    except Exception as e:
+        logger.warning(f"Failed to load config file {config_path}: {e}")
+        return {}
 
 
 def ensure_ollama_running(model: str) -> None:
@@ -182,17 +214,25 @@ Examples:
   python run.py --resumes ./resumes --jd ./jd/jd.txt --model ollama/llama3
   python run.py --resumes ./resumes --jd ./jd/jd.docx --top 5 --debug
   python run.py --resumes ./resumes --jd-dir ./jd --output results.json
+  python run.py --config my_config.yaml
 
 Folder structure:
   AI-Resume-Matcher/
-  ├── resumes/          ← Place candidate resumes here
+  ├── config.yaml           ← Configuration (model, paths, weights)
+  ├── resumes/              ← Place candidate resumes here
   │   ├── rohit_sharma.pdf
   │   ├── anita_iyer.docx
   │   └── vikram_reddy.txt
-  ├── jd/               ← Place job description here
+  ├── jd/                   ← Place job description here
   │   └── senior_backend_developer.pdf
   └── run.py
         """,
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=f"Path to YAML config file (default: {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument(
         "--resumes",
@@ -241,6 +281,20 @@ Folder structure:
         action="store_true",
         default=False,
         help="Enable debug logging (verbose output including LLM responses, scores, etc.)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=3,
+        help="Number of resumes to process in parallel (default: 3). "
+             "Higher = faster but uses more memory. Set to 1 for sequential.",
+    )
+    parser.add_argument(
+        "--explain-top",
+        type=int,
+        default=None,
+        help="Only generate AI explanations for top N candidates (saves ~15s per skipped resume). "
+             "Default: explain all. Recommended for large batches: --explain-top 10",
     )
     return parser.parse_args()
 
@@ -374,94 +428,267 @@ async def run_matching(args):
     resume_texts = [f["text"] for f in resume_files]
     results = await pipeline.match(jd_text=jd_text, resume_texts=resume_texts)
 
-    # ── Step 5: Build filename fallback mapping ───────────────────────────────
-    # When LLM fails to extract a candidate name, we fall back to the filename.
-    # We map raw_text → filename because results are sorted (original index lost).
-    text_to_filename = {f["text"]: f["filename"] for f in resume_files}
+    # ── Step 5: Build filename mapping ──────────────────────────────────────────
+    # Maps raw_text → {filename, path} for each resume.
+    # Used for: (1) fallback display when name extraction fails,
+    #           (2) tracking source file in JSON output for UI consumption.
+    text_to_file = {f["text"]: {"filename": f["filename"], "path": f["path"]} for f in resume_files}
 
     # ── Step 6: Apply top-N filter if requested ───────────────────────────────
     if args.top:
         results = results[: args.top]
 
     # ── Step 7: Display results table ─────────────────────────────────────────
-    print("\n" + "=" * 70)
-    print("RESULTS — Candidate Match Grid (sorted by Match %)")
-    print("=" * 70)
-    print(f"{'#':<4} {'Name':<25} {'Exp':<8} {'Match %':<10} {'Recommendation'}")
-    print("-" * 70)
+    # Format: First Name | Middle Name | Last Name | Contact Number | Email |
+    #         Total Exp.(Years) | % Qualified against JD | Key Skills (Top) |
+    #         Reasoning (Why this score) | Action
+    print("\n" + "=" * 180)
+    print("RESULTS — Candidate Match Grid (sorted by % Qualified)")
+    print("=" * 180)
+
+    # Table header
+    header = (
+        f"{'#':<3} "
+        f"{'Source File':<30} "
+        f"{'First Name':<12} "
+        f"{'Middle':<8} "
+        f"{'Last Name':<15} "
+        f"{'Contact Number':<18} "
+        f"{'Email':<28} "
+        f"{'Exp(Yrs)':<9} "
+        f"{'% Match':<8} "
+        f"{'Key Skills (Top 3)':<35} "
+        f"{'Action'}"
+    )
+    print(header)
+    print("-" * 180)
 
     for i, result in enumerate(results, 1):
-        # Use extracted name, fall back to filename if extraction failed
-        name = result.candidate.full_name or text_to_filename.get(
-            result.candidate.raw_text, f"Candidate {i}"
-        )
-        exp = (
-            f"{result.candidate.total_experience_years}y"
-            if result.candidate.total_experience_years
-            else "N/A"
-        )
-        score = f"{result.qualification_percentage}%"
-        rec = result.recommendation
-        print(f"{i:<4} {name:<25} {exp:<8} {score:<10} {rec}")
+        c = result.candidate  # shorthand for candidate profile
 
-    # ── Step 8: Display detailed view for top candidate ───────────────────────
+        # Source file tracking
+        file_info = text_to_file.get(c.raw_text, {"filename": f"unknown_{i}", "path": ""})
+        source_file = file_info["filename"]
+        # Truncate long filenames for display
+        if len(source_file) > 28:
+            source_file = source_file[:25] + "..."
+
+        # Name fields (fall back to filename if extraction failed)
+        first_name = c.first_name or "-"
+        middle_name = c.middle_name or "-"
+        last_name = c.last_name or "-"
+
+        # Contact info
+        phone = c.phone or "N/A"
+        email = c.email or "N/A"
+
+        # Experience
+        exp = f"{c.total_experience_years}" if c.total_experience_years else "N/A"
+
+        # Match percentage
+        score = f"{result.qualification_percentage}%"
+
+        # Key skills (top 3, comma-separated)
+        top_skills = ", ".join(c.skills[:3]) if c.skills else "N/A"
+        # Truncate if too long for display
+        if len(top_skills) > 33:
+            top_skills = top_skills[:30] + "..."
+
+        # Action (recommendation)
+        action = result.recommendation or "N/A"
+        # Shorten common recommendation prefixes for table fit
+        action = (
+            action.replace("Strong Fit - ", "✅ ")
+            .replace("Good Fit - ", "👍 ")
+            .replace("Partial Fit - ", "⚠️  ")
+            .replace("Weak Fit - ", "❌ ")
+        )
+
+        row = (
+            f"{i:<3} "
+            f"{source_file:<30} "
+            f"{first_name:<12} "
+            f"{middle_name:<8} "
+            f"{last_name:<15} "
+            f"{phone:<18} "
+            f"{email:<28} "
+            f"{exp:<9} "
+            f"{score:<8} "
+            f"{top_skills:<35} "
+            f"{action}"
+        )
+        print(row)
+
+    print("=" * 180)
+
+    # ── Step 8: Display detailed view for each candidate ──────────────────────
     if results:
-        top = results[0]
-        print("\n" + "=" * 70)
-        print(f"TOP CANDIDATE DETAIL")
-        print("=" * 70)
-        print(f"  Name:          {top.candidate.full_name}")
-        print(f"  Email:         {top.candidate.email or 'N/A'}")
-        print(f"  Phone:         {top.candidate.phone or 'N/A'}")
-        print(f"  Experience:    {top.candidate.total_experience_years or 'N/A'} years")
-        print(f"  Match Score:   {top.qualification_percentage}%")
-        print(f"\n  AI Reasoning:")
-        print(f"    {top.reasoning}")
-        print(f"\n  Matched Strengths:")
-        for s in top.key_strengths:
-            print(f"    + {s}")
-        print(f"\n  Missing / Gap Areas:")
-        for s in top.missing_skills:
-            print(f"    - {s}")
-        print(f"\n  Recommendation: {top.recommendation}")
+        print("\n" + "=" * 80)
+        print("DETAILED CANDIDATE REPORTS")
+        print("=" * 80)
+
+        for i, result in enumerate(results, 1):
+            c = result.candidate
+            file_info = text_to_file.get(c.raw_text, {"filename": "unknown", "path": ""})
+            print(f"\n{'─' * 80}")
+            print(f"  #{i} — {c.full_name or 'Unknown'}")
+            print(f"{'─' * 80}")
+            print(f"  Source File:   {file_info['filename']}")
+            print(f"  File Path:     {file_info['path']}")
+            print(f"  First Name:    {c.first_name or 'N/A'}")
+            print(f"  Middle Name:   {c.middle_name or 'N/A'}")
+            print(f"  Last Name:     {c.last_name or 'N/A'}")
+            print(f"  Phone:         {c.phone or 'N/A'}")
+            print(f"  Email:         {c.email or 'N/A'}")
+            print(f"  Location:      {c.location or 'N/A'}")
+            print(f"  Experience:    {c.total_experience_years or 'N/A'} years")
+            print(f"  Match Score:   {result.qualification_percentage}%")
+            print(f"\n  Key Skills:")
+            for s in c.skills[:5]:
+                print(f"    • {s}")
+            print(f"\n  AI Reasoning:")
+            print(f"    {result.reasoning or 'N/A'}")
+            print(f"\n  Matched Strengths:")
+            for s in result.key_strengths:
+                print(f"    + {s}")
+            print(f"\n  Missing / Gap Areas:")
+            for s in result.missing_skills:
+                print(f"    - {s}")
+            print(f"\n  Action: {result.recommendation}")
 
     # ── Step 9: Save to JSON if --output specified ────────────────────────────
+    # This JSON is designed for UI consumption. Each entry maps back to the
+    # source resume file via 'source_file' and 'source_path' fields.
     if args.output:
         import json
 
-        output_data = []
-        for r in results:
-            output_data.append({
-                "name": r.candidate.full_name,
-                "email": r.candidate.email,
-                "phone": r.candidate.phone,
-                "experience_years": r.candidate.total_experience_years,
+        output_data = {
+            "metadata": {
+                "jd_file": str(Path(args.jd).name) if args.jd else "auto-detected from jd/",
+                "jd_title": results[0].job_description.title if results else "",
+                "total_candidates": len(results),
+                "model_used": args.model,
+                "embedding_model": args.embedding_model,
+            },
+            "candidates": [],
+        }
+
+        for rank, r in enumerate(results, 1):
+            file_info = text_to_file.get(r.candidate.raw_text, {"filename": "unknown", "path": ""})
+            output_data["candidates"].append({
+                # ── Resume source tracking (for UI to link back to file) ──
+                "rank": rank,
+                "source_file": file_info["filename"],
+                "source_path": file_info["path"],
+
+                # ── Candidate profile ──
+                "first_name": r.candidate.first_name or None,
+                "middle_name": r.candidate.middle_name or None,
+                "last_name": r.candidate.last_name or None,
+                "full_name": r.candidate.full_name or None,
+                "contact_number": r.candidate.phone or None,
+                "email": r.candidate.email or None,
+                "location": r.candidate.location or None,
+                "total_experience_years": r.candidate.total_experience_years,
+
+                # ── Match results ──
                 "qualification_percentage": r.qualification_percentage,
-                "key_strengths": r.key_strengths,
-                "missing_skills": r.missing_skills,
+                "action": r.recommendation,
                 "reasoning": r.reasoning,
-                "recommendation": r.recommendation,
+
+                # ── Skills & analysis ──
+                "key_skills_top_5": r.candidate.skills[:5],
+                "all_skills": r.candidate.skills,
+                "matched_strengths": r.key_strengths,
+                "missing_skills": r.missing_skills,
+
+                # ── Scoring breakdown (for charts/visualizations in UI) ──
                 "scoring_breakdown": {
-                    "must_have_match": r.scoring_breakdown.must_have_match,
-                    "experience_match": r.scoring_breakdown.experience_match,
-                    "skills_depth": r.scoring_breakdown.skills_depth,
-                    "project_relevance": r.scoring_breakdown.project_relevance,
-                    "recency_factor": r.scoring_breakdown.recency_factor,
+                    "must_have_match": round(r.scoring_breakdown.must_have_match, 3),
+                    "experience_match": round(r.scoring_breakdown.experience_match, 3),
+                    "skills_depth": round(r.scoring_breakdown.skills_depth, 3),
+                    "project_relevance": round(r.scoring_breakdown.project_relevance, 3),
+                    "recency_factor": round(r.scoring_breakdown.recency_factor, 3),
                 },
+
+                # ── Work history (for detailed UI view) ──
+                "work_experiences": [
+                    {
+                        "company": exp.company,
+                        "title": exp.title,
+                        "start_year": exp.start_year,
+                        "end_year": exp.end_year,
+                        "is_current": exp.is_current,
+                        "technologies": exp.technologies,
+                    }
+                    for exp in r.candidate.work_experiences
+                ],
+
+                # ── Education & certifications ──
+                "education": r.candidate.education,
+                "certifications": r.candidate.certifications,
             })
+
         with open(args.output, "w") as f:
-            json.dump(output_data, f, indent=2)
-        print(f"\nResults saved to: {args.output}")
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        print(f"\n\nResults saved to: {args.output}")
+        print(f"  → {len(results)} candidates mapped to their source resume files")
+        print(f"  → Use 'source_file' / 'source_path' fields to link UI back to resumes")
 
 
 def main():
     """
     Application entry point.
 
-    Flow: parse_args() → setup_logging() → ensure_ollama_running() → asyncio.run(run_matching())
+    Flow:
+        1. parse_args() → Parse CLI arguments
+        2. load_config() → Load YAML config file
+        3. Merge: CLI args override config values
+        4. setup_logging() → Configure log levels
+        5. ensure_ollama_running() → Auto-start Ollama if needed
+        6. asyncio.run(run_matching()) → Execute pipeline
+
+    Priority order (highest wins):
+        CLI flags > config.yaml > built-in defaults
     """
     args = parse_args()
+
+    # ── Load config file ──────────────────────────────────────────────────────
+    config_path = Path(args.config) if args.config else DEFAULT_CONFIG_PATH
+    config = load_config(config_path)
+
+    # ── Merge config into args (CLI takes priority over config) ───────────────
+    # For each setting, use CLI value if explicitly provided, else config value.
+    # argparse defaults are used only if neither CLI nor config provides a value.
+    if config:
+        # Model: CLI flag overrides config
+        if args.model == "ollama/llama2" and config.get("model"):
+            args.model = config["model"]
+        # Embedding model
+        if args.embedding_model == "all-MiniLM-L6-v2" and config.get("embedding_model"):
+            args.embedding_model = config["embedding_model"]
+        # Paths
+        if args.resumes == "./resumes" and config.get("resumes_dir"):
+            args.resumes = config["resumes_dir"]
+        if args.jd_dir == "./jd" and config.get("jd_dir"):
+            args.jd_dir = config["jd_dir"]
+        # Performance
+        if args.concurrency == 3 and config.get("concurrency"):
+            args.concurrency = config["concurrency"]
+        if args.explain_top is None and config.get("explain_top"):
+            args.explain_top = config["explain_top"]
+        # Output
+        if args.top is None and config.get("top_n"):
+            args.top = config["top_n"]
+        if args.output is None and config.get("output_file"):
+            args.output = config["output_file"]
+        # Debug
+        if not args.debug and config.get("debug"):
+            args.debug = config["debug"]
+
     setup_logging(debug=args.debug)
+    logger.info(f"Config loaded from: {config_path}")
+    logger.debug(f"Effective settings: model={args.model}, concurrency={args.concurrency}, explain_top={args.explain_top}")
 
     # Auto-start Ollama if using an Ollama model and server isn't running
     ensure_ollama_running(args.model)

@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Resume Matcher — Configuration File
+# ─────────────────────────────────────────────────────────────────────────────
+# All settings can be overridden via CLI flags (CLI takes priority over config).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── LLM Model Configuration ──────────────────────────────────────────────────
+# Supported providers via LiteLLM:
+#   Local:    ollama/llama3, ollama/mistral, ollama/qwen2, ollama/llama3:70b
+#   OpenAI:   gpt-4, gpt-4o, gpt-3.5-turbo
+#   Anthropic: anthropic/claude-3-sonnet-20240229, anthropic/claude-3-opus-20240229
+#   AWS:      bedrock/anthropic.claude-3-sonnet
+model: "ollama/llama3"
+
+# ── Embedding Model ──────────────────────────────────────────────────────────
+# Sentence-transformers model for semantic matching (Stage 3).
+# Smaller models are faster; larger models are more accurate.
+#   Fast:     all-MiniLM-L6-v2 (80MB, good balance)
+#   Accurate: all-mpnet-base-v2 (420MB, better quality)
+embedding_model: "all-MiniLM-L6-v2"
+
+# ── File Paths ────────────────────────────────────────────────────────────────
+resumes_dir: "./resumes"
+jd_dir: "./jd"
+
+# ── Performance ──────────────────────────────────────────────────────────────
+# concurrency: Number of resumes processed in parallel (higher = faster)
+#   Ollama (local): 2-3 recommended (limited by GPU/CPU)
+#   Cloud APIs:     5-10 recommended (rate limit dependent)
+concurrency: 3
+
+# explain_top: Only generate AI explanations for top N candidates.
+#   Set to null to explain all candidates.
+#   Recommended for large batches (50+ resumes): 10
+explain_top: null
+
+# ── LLM Parameters ───────────────────────────────────────────────────────────
+# temperature: Controls randomness of LLM output (0.0 = deterministic, 1.0 = creative)
+#   Lower is better for structured extraction tasks.
+temperature: 0.1
+
+# max_tokens: Maximum tokens for LLM response (higher = less truncation)
+max_tokens: 4096
+
+# ── Scoring Weights ──────────────────────────────────────────────────────────
+# Must sum to 1.0. Adjust based on what matters most for your hiring criteria.
+scoring_weights:
+  must_have_match: 0.35       # Core required skills coverage
+  experience_match: 0.25      # Years/level alignment
+  skills_depth: 0.20          # Depth beyond just having skills
+  project_relevance: 0.12     # Relevant project experience
+  recency_factor: 0.08        # How recent the experience is
+
+# ── Output ────────────────────────────────────────────────────────────────────
+# output_file: Path to save JSON results (set to null to disable)
+output_file: null
+
+# top_n: Show only top N candidates in output (set to null to show all)
+top_n: null
+
+# debug: Enable verbose debug logging
+debug: false

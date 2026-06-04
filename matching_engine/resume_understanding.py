@@ -252,11 +252,13 @@ class ResumeUnderstanding:
 
     def _extract_name_from_text(self, text: str) -> str:
         """
-        Extract candidate name from the beginning of resume text.
+        Extract candidate name from resume text.
 
-        Heuristic: The name is typically one of the first non-empty lines
-        that is short (1-5 words), contains only letters/dots/hyphens,
-        and doesn't look like a section header or contain contact info.
+        Strategy:
+            1. Scan first 15 lines for a short line (2-4 words, all letters)
+               that isn't a section header.
+            2. If not found, scan first 30 lines for a line where most words
+               start with uppercase (typical name pattern).
 
         Called by: _extract_baseline()
         Calls:     nothing (leaf method)
@@ -265,47 +267,83 @@ class ResumeUnderstanding:
             Extracted name string, or "" if no suitable line found
         """
         lines = text.strip().split("\n")
-        logger.debug(
-            "_extract_name_from_text(): scanning first 5 lines of %d total",
-            len(lines),
-        )
 
-        for idx, line in enumerate(lines[:5]):  # Name is usually in first 5 lines
+        # Common resume section headers (normalized, no spaces, lowercase)
+        section_headers = {
+            "summary", "profile", "resume", "curriculum", "objective",
+            "career", "about", "contact", "experience", "education",
+            "skills", "certifications", "projects", "professional",
+            "references", "achievements", "highlights", "overview",
+            "keyskills", "technicalskills", "coreskills", "softskills",
+            "workexperience", "professionalexperience", "employmenthistory",
+            "careersummary", "careerobjective", "personaldetails",
+            "personalinfo", "declaration", "hobbies", "interests",
+            "languages", "awards", "publications", "training",
+        }
+
+        # ── Pass 1: Scan first 15 lines for a clean name line ──
+        for idx, line in enumerate(lines[:15]):
             line = line.strip()
             if not line:
                 continue
 
-            # Skip lines that look like section headers/labels
-            # Normalize spaces for OCR artifacts (e.g., "SUMMAR Y" → "SUMMARY")
+            # Skip section headers (normalize spaces for OCR artifacts)
             normalized = re.sub(r"\s+", "", line).lower()
-            section_headers = {
-                "summary", "profile", "resume", "curriculum", "objective",
-                "career", "about", "contact", "experience", "education",
-                "skills", "certifications", "projects", "professional",
-                "references", "achievements", "highlights", "overview",
-            }
             if normalized in section_headers or any(
                 normalized.startswith(h) for h in section_headers
             ):
-                logger.debug("  Line %d skipped (section header): %r", idx, line)
                 continue
 
-            # Skip lines containing email addresses or long digit sequences (phone)
-            if "@" in line or re.search(r"\d{5,}", line):
-                logger.debug("  Line %d skipped (contains email/phone): %r", idx, line)
+            # Skip lines with email, phone, or URLs
+            if "@" in line or re.search(r"\d{5,}", line) or "http" in line.lower():
                 continue
 
-            # A name line is typically short (2-5 words), mostly letters
+            # Skip lines that are too long (paragraph text)
+            if len(line) > 35:
+                continue
+
+            # Skip lines with dates, special chars (company entries like "BT Group Nov '22")
+            if re.search(r"['\"\d]{2,}|[-–—].*\d{2}", line):
+                continue
+
+            # Skip lines ending with dash/colon (job titles like "Director of Engineering -")
+            if line.endswith("-") or line.endswith(":") or line.endswith("–"):
+                continue
+
+            # A name: 2-4 words, each starts with uppercase, min 2 chars
             words = line.split()
-            if 1 <= len(words) <= 5 and all(
-                re.match(r"^[A-Za-z.\-]+$", w) for w in words
+            if 2 <= len(words) <= 4 and all(
+                re.match(r"^[A-Z][a-zA-Z.\-]*$", w) and len(w) >= 2 for w in words
             ):
-                logger.debug("  Line %d accepted as name: %r", idx, line)
+                logger.debug("  Name found at line %d: %r", idx, line)
                 return line
 
-            logger.debug("  Line %d rejected (word count/chars): %r", idx, line)
+        # ── Pass 2: Broader scan (first 30 lines) for capitalized name pattern ──
+        for idx, line in enumerate(lines[:30]):
+            line = line.strip()
+            if not line or len(line) > 30 or len(line) < 5:
+                continue
 
-        logger.debug("_extract_name_from_text(): no name found in first 5 lines")
+            # Skip section headers
+            normalized = re.sub(r"\s+", "", line).lower()
+            if normalized in section_headers or any(
+                normalized.startswith(h) for h in section_headers
+            ):
+                continue
+
+            # Skip lines with digits, email, special chars
+            if re.search(r"[\d@#$%&*(){}[\]]", line):
+                continue
+
+            # Look for 2-4 words where each starts with uppercase
+            words = line.split()
+            if 2 <= len(words) <= 4 and all(
+                re.match(r"^[A-Z][a-zA-Z.\-]*$", w) for w in words
+            ):
+                logger.debug("  Name found (pass 2) at line %d: %r", idx, line)
+                return line
+
+        logger.debug("_extract_name_from_text(): no name found")
         return ""
 
     # =========================================================================

@@ -7,8 +7,11 @@ AI-powered Resume to Job Description matching engine with a 6-stage pipeline. Us
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Configuration (`config.yaml`)](#configuration-configyaml)
 - [CLI Options](#cli-options)
 - [LLM Providers](#llm-providers)
+- [Performance Tuning](#performance-tuning)
+- [JSON Output (for UI)](#json-output-for-ui)
 - [Framework Architecture](#framework-architecture)
 - [Execution Flow (Sequence of Calls)](#execution-flow-sequence-of-calls)
 - [File-by-File Summary](#file-by-file-summary)
@@ -46,80 +49,246 @@ Then pull the model (one-time download, ~4.7 GB):
 ollama pull llama3
 ```
 
-> **Note:** The script auto-starts Ollama if it's not running. You don't need to manually run `ollama serve` — the framework handles it automatically.
+> **Note:** The script auto-starts Ollama if it's not running. You don't need to manually run `ollama serve` — the framework handles it automatically. It also auto-pulls the model if not downloaded yet.
 
 ### 3. Place your files
 
 ```
 AI-Resume-Matcher/
-├── resumes/                ← Drop all candidate resumes here
-│   ├── rohit_sharma.pdf
-│   ├── anita_iyer.docx
-│   └── vikram_reddy.txt
-├── jd/                     ← Place the job description here
-│   └── senior_backend.pdf
-└── run.py
+├── resumes/                ← Drop all candidate resumes here (PDF/DOCX/TXT)
+├── jd/                     ← Place the job description here (PDF/DOCX/TXT)
+├── config.yaml             ← Configuration (model, paths, weights, performance)
+└── run.py                  ← Run this
 ```
 
-**Supported formats:** PDF, DOCX, TXT
+### 4. Configure (optional)
 
-### 4. Run
+Edit `config.yaml` to set your preferred model and settings:
+
+```yaml
+model: "ollama/llama3"      # Change model here — no CLI flag needed
+concurrency: 3              # Parallel resume processing
+explain_top: 10             # Only explain top 10 candidates (saves time)
+```
+
+### 5. Run
 
 ```bash
-# Basic (uses Ollama local LLM — auto-starts Ollama if not running)
-python run.py --model ollama/llama3
+# Uses config.yaml settings (model, paths, concurrency all from config)
+python run.py
 
-# With specific JD file
-python run.py --jd ./jd/senior_backend.pdf --model ollama/llama3
-
-# With OpenAI GPT-4 (requires OPENAI_API_KEY env var)
+# Override any setting via CLI (CLI takes priority over config)
 python run.py --model gpt-4
+python run.py --concurrency 5 --explain-top 10
+python run.py --output results.json
 
-# Show only top 5 candidates
-python run.py --model ollama/llama3 --top 5
-
-# Save results to JSON
-python run.py --model ollama/llama3 --output results.json
-
-# Enable debug logging (verbose internal state)
-python run.py --model ollama/llama3 --debug
+# Debug mode (verbose logging)
+python run.py --debug
 ```
 
 ### What happens when you run the script
 
-1. **Ollama auto-start** — If using an `ollama/*` model and the server isn't running, the script starts it automatically in the background.
-2. **Model check** — If the required model isn't downloaded yet, it pulls it automatically (first run only).
-3. **File loading** — Reads JD and resumes from the specified folders.
-4. **Pipeline execution** — Runs the 6-stage matching pipeline.
-5. **Results display** — Shows ranked candidates with scores and recommendations.
+1. **Config loaded** — Reads `config.yaml` for model, paths, and performance settings.
+2. **Ollama auto-start** — If using an `ollama/*` model and the server isn't running, starts it automatically.
+3. **Model check** — If the required model isn't downloaded yet, pulls it automatically (first run only).
+4. **File loading** — Reads JD and resumes from configured folders.
+5. **Pipeline execution** — Runs the 6-stage matching pipeline (with concurrent processing).
+6. **Results display** — Shows ranked candidates with full details.
+7. **JSON export** — Saves results to JSON for UI consumption (if `--output` specified).
+
+---
+
+## Configuration (`config.yaml`)
+
+All settings live in one file. CLI flags override config values.
+
+```yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Resume Matcher — Configuration File
+# ─────────────────────────────────────────────────────────────────────────────
+# Priority: CLI flags > config.yaml > built-in defaults
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── LLM Model ────────────────────────────────────────────────────────────────
+# Local:    ollama/llama3, ollama/mistral, ollama/qwen2, ollama/llama3:70b
+# OpenAI:   gpt-4, gpt-4o, gpt-3.5-turbo
+# Anthropic: anthropic/claude-3-sonnet-20240229
+# AWS:      bedrock/anthropic.claude-3-sonnet
+model: "ollama/llama3"
+
+# ── Embedding Model ──────────────────────────────────────────────────────────
+# Fast:     all-MiniLM-L6-v2 (80MB, good balance)
+# Accurate: all-mpnet-base-v2 (420MB, better quality)
+embedding_model: "all-MiniLM-L6-v2"
+
+# ── File Paths ────────────────────────────────────────────────────────────────
+resumes_dir: "./resumes"
+jd_dir: "./jd"
+
+# ── Performance ──────────────────────────────────────────────────────────────
+# concurrency: Resumes processed in parallel
+#   Ollama (local): 2-3 (limited by GPU/CPU)
+#   Cloud APIs:     5-10 (rate limit dependent)
+concurrency: 3
+
+# explain_top: Only generate AI explanations for top N candidates
+#   null = explain all | 10 = recommended for 50+ resumes
+explain_top: null
+
+# ── LLM Parameters ───────────────────────────────────────────────────────────
+temperature: 0.1
+max_tokens: 4096
+
+# ── Scoring Weights (must sum to 1.0) ────────────────────────────────────────
+scoring_weights:
+  must_have_match: 0.35
+  experience_match: 0.25
+  skills_depth: 0.20
+  project_relevance: 0.12
+  recency_factor: 0.08
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_file: null       # Set to "results.json" to always export
+top_n: null             # Show only top N (null = show all)
+debug: false            # Enable verbose logging
+```
+
+**Priority order:** `CLI flags` > `config.yaml` > `built-in defaults`
 
 ---
 
 ## CLI Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--resumes` | `./resumes` | Folder containing resume files |
-| `--jd` | (auto from `./jd/`) | Path to specific JD file |
-| `--jd-dir` | `./jd` | Folder containing JD file(s) |
-| `--model` | `ollama/llama2` | LLM model identifier (see providers below) |
-| `--embedding-model` | `all-MiniLM-L6-v2` | Sentence-transformers model for embeddings |
-| `--top` | all | Show only top N candidates |
-| `--output` | none | Save results to JSON file |
-| `--debug` | off | Enable DEBUG-level logging (shows LLM responses, scores, regex matches) |
+| Flag | Default | Config key | Description |
+|------|---------|------------|-------------|
+| `--config` | `./config.yaml` | — | Path to YAML config file |
+| `--resumes` | `./resumes` | `resumes_dir` | Folder containing resume files |
+| `--jd` | (auto) | — | Path to specific JD file |
+| `--jd-dir` | `./jd` | `jd_dir` | Folder containing JD file(s) |
+| `--model` | `ollama/llama3` | `model` | LLM model identifier |
+| `--embedding-model` | `all-MiniLM-L6-v2` | `embedding_model` | Sentence-transformers model |
+| `--top` | all | `top_n` | Show only top N candidates |
+| `--output` | none | `output_file` | Save results to JSON file |
+| `--concurrency` | 3 | `concurrency` | Parallel resume processing count |
+| `--explain-top` | all | `explain_top` | Only AI-explain top N candidates |
+| `--debug` | off | `debug` | Enable DEBUG-level logging |
 
 ---
 
 ## LLM Providers
 
-Uses [LiteLLM](https://github.com/BerriAI/litellm) — set the appropriate env var for your provider:
+Uses [LiteLLM](https://github.com/BerriAI/litellm) — supports 100+ providers via a single interface:
 
-| Provider | Model flag | Env var needed |
-|----------|-----------|----------------|
-| Ollama (local) | `--model ollama/llama3` | None (run `ollama serve`) |
-| OpenAI | `--model gpt-4` | `OPENAI_API_KEY` |
-| Anthropic | `--model anthropic/claude-3-sonnet-20240229` | `ANTHROPIC_API_KEY` |
-| AWS Bedrock | `--model bedrock/anthropic.claude-3-sonnet` | AWS credentials |
+| Provider | Config `model` value | Env var needed |
+|----------|---------------------|----------------|
+| Ollama (local) | `ollama/llama3` | None (auto-starts) |
+| OpenAI | `gpt-4` or `gpt-4o` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-3-sonnet-20240229` | `ANTHROPIC_API_KEY` |
+| AWS Bedrock | `bedrock/anthropic.claude-3-sonnet` | AWS credentials |
+
+To switch models, edit `config.yaml`:
+```yaml
+model: "gpt-4"    # Just change this line
+```
+
+---
+
+## Performance Tuning
+
+| Resumes | Recommended config | Estimated time |
+|---------|-------------------|----------------|
+| 5 | `concurrency: 3` | ~2 min (Ollama) |
+| 50 | `concurrency: 3, explain_top: 10` | ~12 min (Ollama) |
+| 100 | `concurrency: 5, explain_top: 10` | ~20 min (Ollama) |
+| 100 | `concurrency: 10, explain_top: 10` (GPT-4) | ~5 min |
+
+**Key optimizations built into the pipeline:**
+
+1. **Concurrent processing** — Multiple resumes processed in parallel (configurable via `concurrency`).
+2. **Deferred explainability** — Stage 5 (LLM explanation) runs AFTER sorting. Low-scoring candidates get fast rule-based explanations instead of expensive LLM calls.
+3. **`--explain-top N`** — Only generates AI explanations for the top N candidates. Saves ~15s per skipped candidate.
+4. **Embedding pre-loading** — The sentence-transformers model is loaded once at startup, not per-resume.
+
+```bash
+# Fast batch processing (100 resumes)
+python run.py --concurrency 5 --explain-top 10 --output results.json
+
+# Maximum speed with cloud API
+python run.py --model gpt-4 --concurrency 10 --explain-top 20 --output results.json
+```
+
+---
+
+## JSON Output (for UI)
+
+The `--output results.json` flag produces a structured JSON file designed for UI consumption. Each candidate entry maps back to its source resume file.
+
+```bash
+python run.py --output results.json
+```
+
+**JSON structure:**
+
+```json
+{
+  "metadata": {
+    "jd_file": "Lead_MLOps_Engineer.pdf",
+    "jd_title": "Lead MLOps Engineer",
+    "total_candidates": 5,
+    "model_used": "ollama/llama3",
+    "embedding_model": "all-MiniLM-L6-v2"
+  },
+  "candidates": [
+    {
+      "rank": 1,
+      "source_file": "DevSecOps_MLOps_v3.docx",
+      "source_path": "/full/path/to/resumes/DevSecOps_MLOps_v3.docx",
+
+      "first_name": "Kumar",
+      "middle_name": "S",
+      "last_name": "Karpuram",
+      "full_name": "Kumar S Karpuram",
+      "contact_number": "+91-96864-88688",
+      "email": "shootmail2kumar@gmail.com",
+      "location": "Bangalore, India",
+      "total_experience_years": 17.0,
+
+      "qualification_percentage": 59.7,
+      "action": "Good Fit - Consider for interview",
+      "reasoning": "Strong match in MLOps and cloud platform skills...",
+
+      "key_skills_top_5": ["MLOps", "Docker", "Kubernetes", "Python", "AWS"],
+      "all_skills": ["MLOps", "Docker", "Kubernetes", "Python", "AWS", "..."],
+      "matched_strengths": ["Python expertise", "K8s experience", "..."],
+      "missing_skills": ["Data Science depth", "..."],
+
+      "scoring_breakdown": {
+        "must_have_match": 0.667,
+        "experience_match": 0.800,
+        "skills_depth": 0.534,
+        "project_relevance": 0.600,
+        "recency_factor": 0.800
+      },
+
+      "work_experiences": [
+        {
+          "company": "BT Group",
+          "title": "Sr. Engineering Specialist",
+          "start_year": 2022,
+          "end_year": null,
+          "is_current": true,
+          "technologies": ["Kubernetes", "AWS", "Docker", "Python"]
+        }
+      ],
+
+      "education": ["M.C.A - Bangalore University"],
+      "certifications": ["AWS Solutions Architect"]
+    }
+  ]
+}
+```
+
+**UI mapping:** Use `source_file` and `source_path` to link each result back to the original resume (e.g., for download links, document preview, or file viewer).
 
 ---
 
@@ -130,27 +299,27 @@ Uses [LiteLLM](https://github.com/BerriAI/litellm) — set the appropriate env v
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              run.py (Entry Point)                            │
-│  Parses CLI args → Loads files → Initializes pipeline → Displays results    │
+│  Loads config.yaml → Parses CLI → Auto-starts Ollama → Runs pipeline        │
 └─────────────────────────────────┬───────────────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         pipeline.py (Orchestrator)                           │
-│  Creates all stage engines → Runs stages 1-6 for each resume → Sorts       │
-└───────┬─────────┬─────────┬─────────┬─────────┬─────────┬──────────────────┘
-        │         │         │         │         │         │
-        ▼         ▼         ▼         ▼         ▼         ▼
-   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │ Stage 1 │ │ Stage 2 │ │ Stage 3 │ │ Stage 4 │ │ Stage 5 │ │ Stage 6 │
-   │   JD    │ │ Resume  │ │Semantic │ │Scoring  │ │Explain- │ │ Output  │
-   │ Under-  │ │ Under-  │ │Matching │ │         │ │ability  │ │(Assemble│
-   │standing │ │standing │ │         │ │         │ │         │ │ Result) │
-   └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └─────────┘
+│  Creates stage engines → Concurrent Stages 2-4 → Sort → Stage 5 (top N)    │
+└───────┬─────────┬─────────┬─────────┬─────────┬────────────────────────────┘
+        │         │         │         │         │
+        ▼         ▼         ▼         ▼         ▼
+   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+   │ Stage 1 │ │ Stage 2 │ │ Stage 3 │ │ Stage 4 │ │ Stage 5 │
+   │   JD    │ │ Resume  │ │Semantic │ │Scoring  │ │Explain- │
+   │ Parsing │ │ Parsing │ │Matching │ │         │ │ability  │
+   │ (once)  │ │(parallel)│ │(parallel)│ │(parallel)│ │(top N)  │
+   └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
         │            │           │            │           │
         ▼            ▼           ▼            ▼           ▼
    ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
    │ LiteLLM │ │ LiteLLM │ │Sentence │ │ Scoring │ │ LiteLLM │
-   │  (LLM)  │ │+ Regex  │ │Transf.  │ │ Formula │ │  (LLM)  │
+   │  (LLM)  │ │+ Regex  │ │Transf.  │ │ Formula │ │or Rules │
    └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
 ```
 
@@ -158,365 +327,89 @@ Uses [LiteLLM](https://github.com/BerriAI/litellm) — set the appropriate env v
 
 | Layer | Component | Role |
 |-------|-----------|------|
-| **Entry** | `run.py` | CLI interface, file loading, result display |
-| **Orchestration** | `pipeline.py` | Creates stage engines, runs pipeline, sorts results |
-| **Extraction** | `file_loader.py` | Reads PDF/DOCX/TXT files into raw text |
+| **Config** | `config.yaml` | All settings in one place (model, paths, weights, performance) |
+| **Entry** | `run.py` | CLI interface, config loading, Ollama auto-start, display, JSON export |
+| **Orchestration** | `pipeline.py` | Concurrent execution, stage coordination, result sorting |
+| **Extraction** | `file_loader.py` | Reads PDF/DOCX/TXT into raw text (OCR, text boxes, hyperlinks) |
 | **Stage 1** | `jd_understanding.py` | LLM-based JD parsing → structured requirements |
-| **Stage 2** | `resume_understanding.py` | Regex baseline + LLM parsing → structured profile |
+| **Stage 2** | `resume_understanding.py` | Regex baseline + LLM → structured candidate profile |
 | **Stage 3** | `semantic_matching.py` | Embedding similarity across 6 dimensions |
 | **Stage 4** | `scoring.py` | Weighted formula → qualification percentage |
-| **Stage 5** | `explainability.py` | LLM-generated reasoning + recommendation |
-| **Stage 6** | `pipeline.py` | Assembles final MatchResult object |
+| **Stage 5** | `explainability.py` | LLM reasoning (top N) + rule-based fallback (rest) |
 | **Models** | `models.py` | Pydantic data models for all pipeline data |
 
 ---
 
 ## Execution Flow (Sequence of Calls)
 
-This section documents the exact sequence of method calls from start to finish.
-
-### Phase 1: Startup & File Loading
+### Phase 1: Startup & Configuration
 
 ```
 main()                                          ← run.py entry point
-  ├── parse_args()                              ← Parse CLI arguments (--model, --debug, etc.)
-  ├── setup_logging(debug)                      ← Configure log level (INFO or DEBUG)
+  ├── parse_args()                              ← Parse CLI arguments
+  ├── load_config(config_path)                  ← Load config.yaml
+  ├── Merge: CLI overrides config values        ← Priority: CLI > config > defaults
+  ├── setup_logging(debug)                      ← Configure log level
+  ├── ensure_ollama_running(model)              ← Auto-start Ollama + pull model
   └── asyncio.run(run_matching(args))           ← Start async execution
-        │
-        ├── load_jd(args)                       ← Load Job Description text
-        │     └── file_loader.extract_text()    ← Route to format-specific reader
-        │           ├── _read_pdf()             ← PyPDF2 → pdfplumber → OCR fallback
-        │           ├── _read_docx()            ← Hyperlinks → Text boxes → Paragraphs → Tables
-        │           └── _read_txt()             ← Plain UTF-8 read
-        │
-        └── load_resumes(args)                  ← Load all resume files
-              └── file_loader.load_files_from_directory()
-                    └── extract_text() × N      ← Called for each resume file
 ```
 
-### Phase 2: Pipeline Initialization
+### Phase 2: File Loading
 
 ```
 run_matching(args)
-  └── MatchingPipeline(model, embedding_model)  ← pipeline.py constructor
-        ├── JDUnderstanding(model, temperature)       ← Stage 1 engine
-        ├── ResumeUnderstanding(model, temperature)   ← Stage 2 engine
-        ├── SemanticMatcher(embedding_model)          ← Stage 3 engine
-        │     └── SentenceTransformer.load()          ← Pre-loads embedding model
-        ├── Scorer(weights)                           ← Stage 4 engine
-        └── ExplainabilityEngine(model, temperature)  ← Stage 5 engine
+  ├── load_jd(args)                             ← Load Job Description text
+  │     └── file_loader.extract_text()          ← PyPDF2 → pdfplumber → OCR
+  └── load_resumes(args)                        ← Load all resume files
+        └── file_loader.load_files_from_directory()
+              └── extract_text() × N            ← For each file
 ```
 
-### Phase 3: Pipeline Execution (per JD × all resumes)
+### Phase 3: Pipeline Execution (Concurrent)
 
 ```
 pipeline.match(jd_text, resume_texts)
   │
-  ├── STAGE 1: jd_understanding.extract(jd_text)
-  │     ├── litellm.acompletion()               ← Send JD to LLM
-  │     ├── _extract_json(response)             ← Parse JSON from LLM output
-  │     │     └── _try_parse_json()             ← Fix trailing commas, truncation
-  │     └── _parse_response(data)               ← Convert dict → JobDescription model
+  ├── STAGE 1: jd_understanding.extract(jd_text)     ← Runs ONCE
   │
-  └── FOR EACH RESUME:
-        │
-        ├── STAGE 2: resume_understanding.extract(resume_text)
-        │     ├── _extract_baseline(text)       ← Regex: email, phone, name, experience
-        │     │     ├── _extract_name_from_text()    ← Scan first 5 lines
-        │     │     └── _estimate_experience_from_text()  ← Pattern matching
-        │     ├── _extract_via_llm(text)        ← LLM extraction (with retries)
-        │     │     ├── litellm.acompletion()   ← Send resume to LLM
-        │     │     ├── _extract_json(response) ← Parse JSON (markdown, braces, truncation)
-        │     │     └── _parse_response(data)   ← Convert dict → ResumeProfile
-        │     │           ├── _estimate_experience(work_experiences)
-        │     │           └── _estimate_experience_from_text(raw_text)
-        │     └── _merge_profiles(baseline, llm_profile)  ← LLM priority, baseline fills gaps
-        │
-        ├── STAGE 3: semantic_matcher.match(jd, resume)
-        │     ├── _compute_contextual_similarity()  ← Full text vs full text
-        │     ├── _compute_skill_relevance()        ← JD skills vs resume skills
-        │     ├── _compute_role_alignment()         ← Title+responsibilities vs work history
-        │     ├── _compute_domain_relevance()       ← Industry/domain comparison
-        │     ├── _compute_technology_mapping()     ← Tech stack comparison
-        │     └── _compute_experience_alignment()   ← Years/level comparison (rule-based)
-        │           └── _cosine_similarity(text_a, text_b)  ← Core embedding comparison
-        │                 └── SentenceTransformer.encode()  ← Generate embeddings
-        │
-        ├── STAGE 4: scorer.score(jd, resume, semantic_result)
-        │     ├── _score_must_have_match()      ← % of must-have skills matched
-        │     │     └── _fuzzy_skill_match()    ← Exact + substring + abbreviation matching
-        │     ├── _score_experience_match()     ← Years alignment (within/under/over range)
-        │     ├── _score_skills_depth()         ← Breadth (60%) + semantic relevance (40%)
-        │     ├── _score_project_relevance()    ← Tech overlap between projects and JD
-        │     ├── _score_recency()              ← How recent is the experience
-        │     └── WEIGHTED SUM × 100           ← Final qualification percentage
-        │
-        ├── STAGE 5: explainability.explain(jd, resume, scoring, semantic)
-        │     ├── _build_prompt()               ← Format prompt with all match data
-        │     ├── litellm.acompletion()         ← Send to LLM for explanation
-        │     ├── _extract_json(response)       ← Parse JSON response
-        │     └── _parse_response(data)         ← Convert to ExplainabilityReport
-        │     └── (on failure) _fallback_explanation()  ← Rule-based fallback
-        │
-        └── STAGE 6: Assemble MatchResult       ← Combine all stage outputs
+  ├── STAGES 2-4: CONCURRENT (bounded by semaphore)  ← Runs in PARALLEL
+  │     └── For each resume (up to `concurrency` at a time):
+  │           ├── Stage 2: resume_understanding.extract()
+  │           ├── Stage 3: semantic_matcher.match()
+  │           └── Stage 4: scorer.score()
+  │
+  ├── SORT by qualification_percentage (descending)
+  │
+  └── STAGE 5: explainability (SEQUENTIAL, top N only)
+        ├── Top N candidates → LLM explanation
+        └── Remaining candidates → rule-based fallback (instant)
 ```
 
-### Phase 4: Output & Display
+### Phase 4: Output
 
 ```
 run_matching(args)  (continued)
-  ├── Sort results by qualification_percentage (descending)
-  ├── Display results table (Name, Exp, Match %, Recommendation)
-  ├── Display top candidate detail (strengths, gaps, reasoning)
-  └── (optional) Save to JSON file
+  ├── Display summary table (Source File, Name, Exp, %, Skills, Action)
+  ├── Display detailed reports (per candidate)
+  └── Save JSON (metadata + candidates array with source_file mapping)
 ```
 
 ---
 
 ## File-by-File Summary
 
-### `run.py` — Main Entry Point
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | CLI interface, file loading, pipeline invocation, result display |
-| **Called by** | User (command line) |
-| **Calls** | `file_loader.extract_text()`, `file_loader.load_files_from_directory()`, `MatchingPipeline.match()` |
-| **Key functions** | `main()`, `setup_logging()`, `parse_args()`, `load_jd()`, `load_resumes()`, `run_matching()` |
-| **Notable** | Configures logging (INFO default, DEBUG with `--debug`), suppresses noisy third-party loggers |
-
-### `matching_engine/file_loader.py` — Text Extraction
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Extract raw text from PDF, DOCX, and TXT files |
-| **Called by** | `run.py` (load_jd, load_resumes) |
-| **Calls** | PyPDF2, pdfplumber, pytesseract/pdf2image (OCR), python-docx |
-| **Key functions** | `extract_text()`, `load_files_from_directory()`, `_read_pdf()`, `_read_docx()`, `_ocr_pdf()` |
-| **Notable** | Multi-strategy PDF reading (PyPDF2 → pdfplumber → OCR). DOCX extraction covers paragraphs, tables, text boxes, hyperlinks, headers, and footers. |
-
-### `matching_engine/pipeline.py` — Pipeline Orchestrator
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Creates all stage engines, runs the 6-stage pipeline, sorts results |
-| **Called by** | `run.py` → `run_matching()` |
-| **Calls** | All 5 stage modules (jd_understanding, resume_understanding, semantic_matching, scoring, explainability) |
-| **Key class** | `MatchingPipeline` |
-| **Key methods** | `match()`, `match_single()`, `_process_single_resume()`, `match_with_parsed_inputs()` |
-| **Notable** | Stage 1 runs once per JD; Stages 2-6 run once per resume |
-
-### `matching_engine/jd_understanding.py` — Stage 1: JD Parsing
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Extract structured requirements from raw JD text using LLM |
-| **Called by** | `pipeline.py` → `match()` |
-| **Calls** | `litellm.acompletion()` (LLM API) |
-| **Key class** | `JDUnderstanding` |
-| **Key methods** | `extract()`, `_extract_json()`, `_try_parse_json()`, `_parse_response()`, `_fallback_extraction()` |
-| **Output** | `JobDescription` model (title, must_have_skills, good_to_have_skills, experience_range, education, domain, certifications, responsibilities) |
-| **Notable** | Falls back to empty model (preserving raw_text) if LLM fails — downstream stages can still use raw text for semantic matching |
-
-### `matching_engine/resume_understanding.py` — Stage 2: Resume Parsing
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Extract structured candidate profile from raw resume text |
-| **Called by** | `pipeline.py` → `_process_single_resume()` |
-| **Calls** | `litellm.acompletion()` (LLM API), regex patterns |
-| **Key class** | `ResumeUnderstanding` |
-| **Key methods** | `extract()`, `_extract_baseline()`, `_extract_via_llm()`, `_merge_profiles()`, `_extract_json()`, `_parse_response()`, `_estimate_experience()`, `_estimate_experience_from_text()` |
-| **Output** | `ResumeProfile` model (name, email, phone, skills, experience, work_history, projects, education, certifications) |
-| **Notable** | Two-pass strategy: (1) Regex baseline always succeeds for contact info, (2) LLM provides rich data. Merge ensures no field is ever empty if data exists in the text. Retries LLM up to 3 times on failure. |
-
-### `matching_engine/semantic_matching.py` — Stage 3: Embedding Similarity
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Compute embedding-based semantic similarity across 6 dimensions |
-| **Called by** | `pipeline.py` → `_process_single_resume()` |
-| **Calls** | `SentenceTransformer.encode()` (sentence-transformers library) |
-| **Key class** | `SemanticMatcher` |
-| **Key methods** | `match()`, `_compute_contextual_similarity()`, `_compute_skill_relevance()`, `_compute_role_alignment()`, `_compute_domain_relevance()`, `_compute_technology_mapping()`, `_compute_experience_alignment()`, `_cosine_similarity()` |
-| **Output** | `SemanticMatchResult` model (6 scores, each 0.0-1.0) |
-| **Notable** | Pre-loads embedding model at init. Handles corporate proxy SSL issues (Zscaler) by patching httpx. Sets HF_HUB_OFFLINE after load to prevent async HTTP issues. |
-
-### `matching_engine/scoring.py` — Stage 4: Weighted Scoring
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Compute weighted qualification percentage from multiple dimensions |
-| **Called by** | `pipeline.py` → `_process_single_resume()` |
-| **Calls** | Internal scoring methods (no external dependencies) |
-| **Key class** | `Scorer` |
-| **Key methods** | `score()`, `_score_must_have_match()`, `_score_experience_match()`, `_score_skills_depth()`, `_score_project_relevance()`, `_score_recency()`, `_fuzzy_skill_match()` |
-| **Output** | `ScoringBreakdown` model (5 dimension scores + final qualification_percentage) |
-| **Notable** | Configurable weights (default: must_have 35%, experience 25%, depth 20%, projects 12%, recency 8%). Fuzzy skill matching handles abbreviations (k8s=kubernetes, js=javascript, etc.) |
-
-### `matching_engine/explainability.py` — Stage 5: Explanation Generation
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Generate human-readable reasoning for the match score |
-| **Called by** | `pipeline.py` → `_process_single_resume()` |
-| **Calls** | `litellm.acompletion()` (LLM API) |
-| **Key class** | `ExplainabilityEngine` |
-| **Key methods** | `explain()`, `_build_prompt()`, `_extract_json()`, `_parse_response()`, `_fallback_explanation()` |
-| **Output** | `ExplainabilityReport` model (reason_for_score, matched_strengths, missing_skills, improvement_areas, recommendation) |
-| **Notable** | Has a deterministic rule-based fallback that generates explanations from scoring data when LLM fails. Recommendation tiers: Strong Fit (≥85%), Good Fit (≥70%), Partial Fit (≥50%), Weak Fit (<50%). |
-
-### `matching_engine/models.py` — Data Models
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Pydantic data models for all pipeline data structures |
-| **Called by** | All stage modules |
-| **Key models** | `JobDescription`, `ResumeProfile`, `SemanticMatchResult`, `ScoringBreakdown`, `ExplainabilityReport`, `MatchResult`, `Skill`, `WorkExperience`, `Project` |
-| **Notable** | All models use Pydantic v2 with sensible defaults. `ResumeProfile.full_name` is a computed property combining first/middle/last. |
-
----
-
-## Pipeline Stages (Detailed)
-
-### Stage 1: JD Understanding
-
-```
-Input:  Raw JD text (string from PDF/DOCX/TXT)
-Output: JobDescription model
-Method: LLM-based extraction via litellm
-```
-
-Extracts:
-- Job title
-- Must-have skills (with optional years_required)
-- Good-to-have skills
-- Experience range (min/max years)
-- Education requirements
-- Domain/industry
-- Certifications
-- Responsibilities
-- Location
-- Role level (entry/mid/senior/lead/principal)
-
-### Stage 2: Resume Understanding
-
-```
-Input:  Raw resume text (string from PDF/DOCX/TXT)
-Output: ResumeProfile model
-Method: Regex baseline + LLM extraction + merge
-```
-
-**Two-pass strategy:**
-
-| Pass | Method | Reliability | Data Quality |
-|------|--------|-------------|--------------|
-| Pass 1 (Baseline) | Regex patterns | Always succeeds | Basic (name, email, phone, experience) |
-| Pass 2 (LLM) | litellm.acompletion() | May fail | Rich (skills, work history, projects, education) |
-| Merge | Priority logic | Always succeeds | Best of both |
-
-Merge rules:
-- LLM data wins for rich fields (skills, work history, projects)
-- Baseline fills gaps in contact info (email, phone, name, experience)
-- If LLM fails entirely, baseline-only profile is returned
-
-### Stage 3: Semantic Matching
-
-```
-Input:  JobDescription + ResumeProfile
-Output: SemanticMatchResult (6 scores, each 0.0-1.0)
-Method: Sentence embeddings + cosine similarity
-```
-
-| Dimension | What it compares | Score meaning |
-|-----------|-----------------|---------------|
-| `contextual_similarity` | Full JD text vs full resume text | Overall relevance |
-| `skill_relevance` | JD skills list vs resume skills list | Skill alignment |
-| `role_alignment` | JD title+responsibilities vs work history | Role fit |
-| `domain_relevance` | JD industry vs resume domains | Industry match |
-| `technology_mapping` | JD tech stack vs resume tech stack | Tech alignment |
-| `experience_alignment` | JD years range vs candidate years | Experience fit |
-
-### Stage 4: Scoring
-
-```
-Input:  JobDescription + ResumeProfile + SemanticMatchResult
-Output: ScoringBreakdown (5 scores + final percentage)
-Method: Weighted formula (configurable weights)
-```
-
-**Default weights:**
-
-| Dimension | Weight | What it measures |
-|-----------|--------|-----------------|
-| `must_have_match` | 35% | % of must-have skills the candidate has |
-| `experience_match` | 25% | How well experience years align with requirements |
-| `skills_depth` | 20% | Breadth (60%) + semantic relevance (40%) |
-| `project_relevance` | 12% | Technology overlap between projects and JD |
-| `recency_factor` | 8% | How recent the relevant experience is |
-
-**Formula:** `qualification_% = (Σ dimension_score × weight) × 100`
-
-### Stage 5: Explainability
-
-```
-Input:  JobDescription + ResumeProfile + ScoringBreakdown + SemanticMatchResult
-Output: ExplainabilityReport
-Method: LLM-generated reasoning (with rule-based fallback)
-```
-
-Generates:
-- Reason for score (2-3 sentences)
-- Matched strengths (3-5 items)
-- Missing skills
-- Improvement areas
-- Recommendation tier
-
-### Stage 6: Output
-
-```
-Input:  All stage outputs
-Output: MatchResult (final structured result per candidate)
-Method: Assembly (no computation)
-```
-
-Combines candidate profile, scores, explanations, and recommendations into a single `MatchResult` object. Results are sorted by `qualification_percentage` (highest first).
-
----
-
-## Data Models
-
-```
-MatchResult
-├── candidate: ResumeProfile
-│     ├── first_name, last_name, email, phone, location
-│     ├── career_summary, skills[], certifications[]
-│     ├── total_experience_years
-│     ├── work_experiences[]: WorkExperience
-│     │     ├── company, title, start_year, end_year, is_current
-│     │     ├── technologies[], responsibilities[]
-│     │     └── domain, duration_months
-│     ├── projects[]: Project
-│     │     ├── name, description, technologies[]
-│     │     └── duration_months, role
-│     ├── education[], domain_expertise[]
-│     └── raw_text
-├── job_description: JobDescription
-│     ├── title, location, role_level
-│     ├── must_have_skills[]: Skill (name, category, years_required)
-│     ├── good_to_have_skills[]: Skill
-│     ├── experience_range_min, experience_range_max
-│     ├── education[], certifications[], responsibilities[]
-│     ├── domain_industry[]
-│     └── raw_text
-├── qualification_percentage: float (0-100)
-├── semantic_scores: SemanticMatchResult (6 floats)
-├── scoring_breakdown: ScoringBreakdown (5 floats + percentage)
-├── explainability: ExplainabilityReport
-├── key_strengths[], missing_skills[]
-├── reasoning: str
-└── recommendation: str
-```
+| File | Purpose | Called by | Calls |
+|------|---------|-----------|-------|
+| `run.py` | CLI, config, Ollama auto-start, display, JSON export | User | config.yaml, file_loader, pipeline |
+| `config.yaml` | All settings (model, paths, weights, performance) | run.py | — |
+| `file_loader.py` | PDF/DOCX/TXT text extraction (OCR, text boxes, hyperlinks) | run.py | PyPDF2, pdfplumber, pytesseract, python-docx |
+| `pipeline.py` | Orchestrates stages 1-6 with concurrency | run.py | All stage modules |
+| `jd_understanding.py` | Stage 1: LLM-based JD parsing | pipeline.py | litellm |
+| `resume_understanding.py` | Stage 2: Regex + LLM resume parsing | pipeline.py | litellm, regex |
+| `semantic_matching.py` | Stage 3: Embedding similarity (6 dimensions) | pipeline.py | sentence-transformers |
+| `scoring.py` | Stage 4: Weighted scoring formula | pipeline.py | — (internal math) |
+| `explainability.py` | Stage 5: LLM explanation + rule-based fallback | pipeline.py | litellm |
+| `models.py` | Pydantic data models | All modules | — |
 
 ---
 
@@ -524,26 +417,26 @@ MatchResult
 
 ```
 AI-Resume-Matcher/
-├── run.py                              ← Main entry point (CLI, display, JSON output)
+├── run.py                              ← Main entry point
+├── config.yaml                         ← Configuration (model, paths, weights, performance)
 ├── requirements.txt                    ← Python dependencies
+├── .gitignore                          ← Git ignore rules
 ├── README.md                           ← This file
-├── resumes/                            ← Place candidate resume files here
-│   ├── .gitkeep
-│   └── (your PDF/DOCX/TXT files)
-├── jd/                                 ← Place job description file here
-│   ├── .gitkeep
-│   └── (your JD PDF/DOCX/TXT file)
+├── resumes/                            ← Place candidate resumes here (PDF/DOCX/TXT)
+│   └── .gitkeep
+├── jd/                                 ← Place JD file here (PDF/DOCX/TXT)
+│   └── .gitkeep
 └── matching_engine/                    ← Core framework package
-    ├── __init__.py                     ← Package marker
-    ├── models.py                       ← Pydantic data models (all pipeline data structures)
+    ├── __init__.py
+    ├── models.py                       ← Pydantic data models
     ├── file_loader.py                  ← Text extraction (PDF/DOCX/TXT, OCR, text boxes)
     ├── jd_understanding.py             ← Stage 1: LLM-based JD parsing
     ├── resume_understanding.py         ← Stage 2: Regex + LLM resume parsing
-    ├── semantic_matching.py            ← Stage 3: Embedding-based similarity (6 dimensions)
+    ├── semantic_matching.py            ← Stage 3: Embedding similarity (6 dimensions)
     ├── scoring.py                      ← Stage 4: Weighted scoring formula
     ├── explainability.py               ← Stage 5: LLM explanation + rule-based fallback
-    ├── pipeline.py                     ← Pipeline orchestrator (creates engines, runs stages)
-    └── example_usage.py                ← Demo script with hardcoded sample data
+    ├── pipeline.py                     ← Pipeline orchestrator (concurrent stages)
+    └── example_usage.py                ← Demo script with sample data
 ```
 
 ---
@@ -553,64 +446,41 @@ AI-Resume-Matcher/
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | JD shows 0 characters | Scanned/image-based PDF | Install OCR: `brew install tesseract poppler && pip install pytesseract pdf2image` |
-| All scores are identical (78.6%) | Ollama not running OR JD text empty | The script now auto-starts Ollama. If still failing, check JD file format. |
-| SSL certificate errors | Corporate proxy (Zscaler) | Handled automatically (`LITELLM_LOCAL_MODEL_COST_MAP=True` is set by the script) |
-| Embedding model fails | SSL blocks HuggingFace download | The framework auto-patches httpx SSL; if still failing, download model manually |
-| LLM returns empty/bad JSON | Model too small for structured output | Use `ollama/llama3` or larger; the framework retries 3 times automatically |
-| DOCX shows minimal text | Content in text boxes/tables | Fixed: the framework extracts from paragraphs, tables, text boxes, hyperlinks, headers, and footers |
-| Name/email/phone missing | LLM failed to extract | Fixed: regex baseline always extracts contact info as fallback |
-| "SUMMAR Y" as name | OCR artifact with spaces | Fixed: section header detection normalizes spaces before matching |
-| Ollama not installed | Binary not found | Install: `brew install ollama` or download from https://ollama.com/download |
-| Model not found | Model not pulled yet | The script auto-pulls the model on first run, or manually: `ollama pull llama3` |
+| All scores identical (78.6%) | Ollama not running OR JD empty | Script auto-starts Ollama. Check if JD file has extractable text. |
+| SSL certificate errors | Corporate proxy (Zscaler) | Handled automatically (script sets `LITELLM_LOCAL_MODEL_COST_MAP=True`) |
+| Embedding model fails | SSL blocks HuggingFace | Framework auto-patches httpx SSL verification |
+| LLM returns bad JSON | Model too small | Use `ollama/llama3` or larger; framework retries 3 times + has fallbacks |
+| DOCX shows minimal text | Content in text boxes/tables | Framework extracts from paragraphs, tables, text boxes, hyperlinks, headers, footers |
+| Name/email/phone missing | LLM failed | Regex baseline always extracts contact info as fallback |
+| Ollama not installed | Binary not found | `brew install ollama` or https://ollama.com/download |
+| Model not found | Not pulled yet | Script auto-pulls on first run, or: `ollama pull llama3` |
+| Slow (100+ resumes) | Sequential processing | Use `--concurrency 5 --explain-top 10` |
 
 ---
 
 ## Example Output
 
+### Terminal (Summary Table)
+
 ```
-======================================================================
-AI RESUME MATCHER
-======================================================================
-  JD loaded: 5689 characters
-  Resumes found: 5
-  Model: ollama/llama3
-  Embeddings: all-MiniLM-L6-v2
-  Debug mode: OFF
-======================================================================
+⏱  Pipeline completed in 95.3 seconds (5 resumes)
 
-======================================================================
-RESULTS — Candidate Match Grid (sorted by Match %)
-======================================================================
-#    Name                      Exp      Match %    Recommendation
-----------------------------------------------------------------------
-1    Kumar S Karpuram          17.0y    59.7%      Good Fit - Consider for interview
-2    Kumar S Karpuram          13.0y    56.6%      Good Fit - Consider for interview
-3    Jyothi Kancharla          15.0y    52.2%      Good Fit - Consider for interview
-4    Arun Prasad Sridharan     17.0y    50.9%      Good Fit - Consider for interview
-5    Kumar S Karpuram          13.0y    32.0%      Partial Fit - May need additional screening
-
-======================================================================
-TOP CANDIDATE DETAIL
-======================================================================
-  Name:          Kumar S Karpuram
-  Email:         shootmail2kumar@gmail.com
-  Phone:         +91-96864-88688
-  Experience:    17.0 years
-  Match Score:   59.7%
-
-  AI Reasoning:
-    Strong match in MLOps, DevSecOps, and cloud platform skills...
-
-  Matched Strengths:
-    + Python expertise with ML libraries
-    + Kubernetes and Docker containerization
-    + AWS cloud platform experience
-
-  Missing / Gap Areas:
-    - Limited data science project experience
-
-  Recommendation: Good Fit - Consider for interview
+====================================================================================================================
+RESULTS — Candidate Match Grid (sorted by % Qualified)
+====================================================================================================================
+#   Source File                     First Name   Middle   Last Name       Contact Number     Email                        Exp(Yrs)  % Match  Key Skills (Top 3)                  Action
+--------------------------------------------------------------------------------------------------------------------
+1   DevSecOps_MLOps_v3.docx         Kumar        S        Karpuram        +91-96864-88688    shootmail2kumar@gmail.com    17.0      59.7%    MLOps, Docker, Kubernetes...         👍 Consider for interview
+2   Kumar_DevSecOps_MLOps_v1.pdf    Kumar        S        Karpuram        +91-96864-88688    shootmail2kumar@gmail.com    13.0      56.6%    Python, AWS, Terraform...            👍 Consider for interview
+3   Jyothi Kancharla.docx           Jyothi       -        Kancharla       +91-7093455517     Jyothi.Kancharla@gmail.com   15.0      52.2%    Data Science, Python, NLP...         👍 Consider for interview
+4   Arun Prasad Resume.pdf          Arun         -        Prasad          9900912302         arunprasad@gmail.com         17.0      50.9%    Java, Spring, Microservices...       ⚠️  May need additional screening
+5   Resume_Sr.Engineering_Spec...   Kumar        S        K               +91-96864-88688    shootmail2kumar@gmail.com    13.0      32.0%    Selenium, Java, DevOps...            ⚠️  May need additional screening
+====================================================================================================================
 ```
+
+### JSON Output (`results.json`)
+
+See [JSON Output (for UI)](#json-output-for-ui) section above for full structure.
 
 ---
 
