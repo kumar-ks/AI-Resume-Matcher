@@ -37,6 +37,7 @@ from pathlib import Path
 import yaml
 
 from matching_engine.file_loader import extract_text, load_files_from_directory
+from matching_engine.llm_client import LLMClient, validate_llm_access, estimate_token_usage
 from matching_engine.pipeline import MatchingPipeline
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +397,23 @@ async def run_matching(args):
         Stage 5: Explainability (LLM) → Generate human-readable reasoning
         Stage 6: Output → Assemble final MatchResult
     """
+    # ── Step 0: Validate LLM access (token/API check) ────────────────────────
+    # Makes a lightweight test call to verify the model is reachable before
+    # processing all resumes. Fails over to backup model if primary is down.
+    failover_model = getattr(args, "failover_model", None)
+    print("\n  Validating LLM access...")
+    validation = await validate_llm_access(args.model, failover_model)
+
+    if validation["status"] == "failed":
+        print(f"\n  ERROR: {validation['message']}")
+        print("  Check your API keys, network connection, or Ollama server.")
+        sys.exit(1)
+    elif validation["status"] == "failover":
+        print(f"  ⚠️  {validation['message']}")
+        args.model = validation["model"]  # Switch to failover model for pipeline
+    else:
+        print(f"  ✓ {validation['message']}")
+
     # ── Step 1: Load input files ──────────────────────────────────────────────
     jd_text = load_jd(args)
     resume_files = load_resumes(args)
@@ -406,13 +424,50 @@ async def run_matching(args):
     print("=" * 70)
     print(f"  JD loaded: {len(jd_text)} characters")
     print(f"  Resumes found: {len(resume_files)}")
-    print(f"  Model: {args.model}")
+    print(f"  Model: {args.model}" + (" (failover)" if validation["status"] == "failover" else ""))
+    print(f"  Failover: {failover_model or 'none'}")
     print(f"  Embeddings: {args.embedding_model}")
+    print(f"  Concurrency: {args.concurrency}")
     print(f"  Debug mode: {'ON' if args.debug else 'OFF'}")
     print("=" * 70)
 
+    # ── Step 2.5: Token estimation (pre-flight budget check) ──────────────────
+    # Estimates total tokens needed BEFORE running the pipeline.
+    # Warns if inputs exceed model context window or cost is high.
+    resume_texts = [f["text"] for f in resume_files]
+    token_estimate = estimate_token_usage(
+        jd_text=jd_text,
+        resume_texts=resume_texts,
+        model=args.model,
+        explain_top_n=args.explain_top,
+    )
+
+    print(f"\n  Token Budget Estimate:")
+    print(f"    Input tokens:  ~{token_estimate['total_input_tokens']:,}")
+    print(f"    Output tokens: ~{token_estimate['total_output_tokens']:,}")
+    print(f"    Total tokens:  ~{token_estimate['total_tokens']:,}")
+    print(f"    LLM calls:     {token_estimate['num_llm_calls']}")
+    print(f"    Context window: {token_estimate['context_window']:,} tokens ({args.model})")
+    if token_estimate['estimated_cost_usd'] > 0:
+        print(f"    Estimated cost: ${token_estimate['estimated_cost_usd']:.4f} USD")
+    else:
+        print(f"    Estimated cost: FREE (local model)")
+
+    # Display warnings if any
+    if token_estimate['warnings']:
+        print(f"\n  ⚠️  Warnings:")
+        for w in token_estimate['warnings']:
+            print(f"    - {w}")
+
+    if not token_estimate['sufficient']:
+        print(f"\n  ERROR: Some inputs exceed the model's context window.")
+        print(f"  Consider using a model with a larger context (e.g., gpt-4o, claude-3-sonnet)")
+        print(f"  or reducing resume/JD size.")
+        sys.exit(1)
+
+    print()
+
     # ── Step 3: Initialize the matching pipeline ──────────────────────────────
-    # This creates instances of all 5 stage engines:
     #   - JDUnderstanding (Stage 1)
     #   - ResumeUnderstanding (Stage 2)
     #   - SemanticMatcher (Stage 3) — also pre-loads the embedding model
@@ -421,11 +476,13 @@ async def run_matching(args):
     pipeline = MatchingPipeline(
         model=args.model,
         embedding_model=args.embedding_model,
+        concurrency=args.concurrency,
+        explain_top_n=args.explain_top,
     )
 
     # ── Step 4: Run the matching pipeline ─────────────────────────────────────
     # pipeline.match() executes stages 1-6 for each resume against the JD
-    resume_texts = [f["text"] for f in resume_files]
+    # (resume_texts already prepared in Step 2.5 for token estimation)
     results = await pipeline.match(jd_text=jd_text, resume_texts=resume_texts)
 
     # ── Step 5: Build filename mapping ──────────────────────────────────────────
@@ -664,6 +721,8 @@ def main():
         # Model: CLI flag overrides config
         if args.model == "ollama/llama2" and config.get("model"):
             args.model = config["model"]
+        # Failover model (only from config, no CLI flag for this)
+        args.failover_model = config.get("failover_model")
         # Embedding model
         if args.embedding_model == "all-MiniLM-L6-v2" and config.get("embedding_model"):
             args.embedding_model = config["embedding_model"]
@@ -685,13 +744,18 @@ def main():
         # Debug
         if not args.debug and config.get("debug"):
             args.debug = config["debug"]
+    else:
+        args.failover_model = None
 
     setup_logging(debug=args.debug)
     logger.info(f"Config loaded from: {config_path}")
-    logger.debug(f"Effective settings: model={args.model}, concurrency={args.concurrency}, explain_top={args.explain_top}")
+    logger.info(f"Primary model: {args.model} | Failover: {args.failover_model or 'none'}")
+    logger.debug(f"Effective settings: concurrency={args.concurrency}, explain_top={args.explain_top}")
 
-    # Auto-start Ollama if using an Ollama model and server isn't running
+    # Auto-start Ollama if using an Ollama model (primary or failover)
     ensure_ollama_running(args.model)
+    if args.failover_model:
+        ensure_ollama_running(args.failover_model)
 
     # Set environment variable to skip remote model cost map fetch (avoids SSL issues)
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")

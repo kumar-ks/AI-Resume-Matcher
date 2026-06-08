@@ -11,12 +11,12 @@ AI-powered Resume to Job Description matching engine with a 6-stage pipeline. Us
 - [CLI Options](#cli-options)
 - [LLM Providers](#llm-providers)
 - [Performance Tuning](#performance-tuning)
+- [Model Failover](#model-failover)
+- [Scoring Weights — Design Rationale](#scoring-weights--design-rationale)
 - [JSON Output (for UI)](#json-output-for-ui)
 - [Framework Architecture](#framework-architecture)
 - [Execution Flow (Sequence of Calls)](#execution-flow-sequence-of-calls)
 - [File-by-File Summary](#file-by-file-summary)
-- [Pipeline Stages (Detailed)](#pipeline-stages-detailed)
-- [Data Models](#data-models)
 - [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
 - [Example Output](#example-output)
@@ -219,6 +219,121 @@ python run.py --model gpt-4 --concurrency 10 --explain-top 20 --output results.j
 
 ---
 
+## Model Failover
+
+The framework supports automatic failover between models. If the primary model (e.g., Claude) is unavailable, it switches to the failover model (e.g., Ollama) transparently.
+
+### How it works
+
+```
+┌─────────────────┐     FAIL      ┌─────────────────┐
+│  Primary Model  │──────────────▶│  Failover Model │
+│  (Claude/GPT-4) │               │  (Ollama local) │
+└────────┬────────┘               └────────┬────────┘
+         │ SUCCESS                          │ SUCCESS
+         ▼                                  ▼
+   ┌───────────┐                     ┌───────────┐
+   │  Pipeline │                     │  Pipeline │
+   │  proceeds │                     │  proceeds │
+   └───────────┘                     └───────────┘
+```
+
+### Configuration
+
+In `config.yaml`:
+```yaml
+model: "anthropic/claude-3-sonnet-20240229"   # Primary (tried first)
+failover_model: "ollama/llama3"                # Fallback (used if primary fails)
+```
+
+### Pre-flight validation
+
+Before the pipeline starts, the framework:
+1. Checks if the API key is set (for cloud models)
+2. Pings the primary model to verify availability
+3. If primary is down → pings failover model
+4. Reports which model will be used
+
+```
+Validating LLM access...
+  ⚠️  Primary 'anthropic/claude-3-sonnet' unavailable. Using failover 'ollama/llama3'.
+```
+
+### Failover triggers
+
+The failover activates on:
+- Missing API key (`AuthenticationError`)
+- Network timeout or connection error
+- Rate limiting (`429 Too Many Requests`)
+- Model not found or unavailable
+
+Once failed over, all subsequent calls use the failover model (no ping-pong).
+
+---
+
+## Scoring Weights — Design Rationale
+
+### Why these 5 dimensions?
+
+These map to the **5 signals a recruiter evaluates** when screening resumes:
+
+| Dimension | Recruiter's question | Why it matters |
+|-----------|---------------------|----------------|
+| `must_have_match` (35%) | "Does this person have the required skills?" | Hard filter — lacking core skills is a disqualifier |
+| `experience_match` (25%) | "Do they have enough years at this level?" | A 2-year dev won't fit a Lead role |
+| `skills_depth` (20%) | "Do they actually know these technologies deeply?" | Listing "Python" ≠ building production ML pipelines |
+| `project_relevance` (12%) | "Have they built relevant things?" | Proves practical application, not just keywords |
+| `recency_factor` (8%) | "Is their experience current?" | Java in 2010 is less relevant than Java in 2024 |
+
+### Why these specific weights?
+
+```
+must_have_match:  0.35  ← HIGHEST: Hard filter — "Can they do the job?"
+experience_match: 0.25  ← HIGH: Level alignment — "Are they senior enough?"
+skills_depth:     0.20  ← MEDIUM: Beyond keywords — "How deep is their expertise?"
+project_relevance:0.12  ← LOWER: Evidence — "Have they applied it?"
+recency_factor:   0.08  ← LOWEST: Tiebreaker — "Is it recent?"
+```
+
+**The reasoning:**
+- **35% must-have skills** — The gatekeeper. If a candidate lacks 3 of 5 must-have skills, they're out regardless of experience. Gets the highest weight.
+- **25% experience** — Seniority level matters heavily. A Lead role needs someone who's led teams, not a fresh graduate with matching keywords.
+- **20% depth** — Separates "I've used Docker once" from "I've built production Kubernetes clusters." Uses semantic embeddings to detect this beyond exact keyword matching.
+- **12% projects** — Practical evidence. Lower weight because not all resumes list projects (especially senior engineers who describe work in responsibilities instead).
+- **8% recency** — A tiebreaker. If two candidates score the same on everything else, the one with more recent relevant experience wins. Low weight because skills don't expire quickly.
+
+### Customizing for different roles
+
+```yaml
+# Senior IC role (skills matter most):
+scoring_weights:
+  must_have_match: 0.40
+  experience_match: 0.20
+  skills_depth: 0.25
+  project_relevance: 0.10
+  recency_factor: 0.05
+
+# Leadership role (experience matters most):
+scoring_weights:
+  must_have_match: 0.25
+  experience_match: 0.35
+  skills_depth: 0.15
+  project_relevance: 0.15
+  recency_factor: 0.10
+
+# Junior role (potential over experience):
+scoring_weights:
+  must_have_match: 0.30
+  experience_match: 0.10
+  skills_depth: 0.25
+  project_relevance: 0.25
+  recency_factor: 0.10
+```
+
+The only rule: **weights must sum to 1.0**. If they don't, the scorer auto-normalizes and logs a warning.
+
+---
+
 ## JSON Output (for UI)
 
 The `--output results.json` flag produces a structured JSON file designed for UI consumption. Each candidate entry maps back to its source resume file.
@@ -313,7 +428,7 @@ python run.py --output results.json
    │ Stage 1 │ │ Stage 2 │ │ Stage 3 │ │ Stage 4 │ │ Stage 5 │
    │   JD    │ │ Resume  │ │Semantic │ │Scoring  │ │Explain- │
    │ Parsing │ │ Parsing │ │Matching │ │         │ │ability  │
-   │ (once)  │ │(parallel)│ │(parallel)│ │(parallel)│ │(top N)  │
+   │ (once)  │ │(parallel)││(parallel)││(parallel)││(top N)  │
    └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
         │            │           │            │           │
         ▼            ▼           ▼            ▼           ▼
