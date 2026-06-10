@@ -33,7 +33,6 @@ FLOW:
 
 import json
 import logging
-import re
 from typing import Optional
 
 import litellm
@@ -44,6 +43,7 @@ from matching_engine.models import (
     Skill,
     SkillCategory,
 )
+from matching_engine.utils import extract_json_from_llm_response
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,7 @@ class JDUnderstanding:
                 ],
                 temperature=self.temperature,
                 max_tokens=4096,
+                timeout=300,  # 5 min — allows for Ollama cold start + generation
             )
 
             # ── Step 2: Extract raw content from LLM response ──
@@ -149,7 +150,7 @@ class JDUnderstanding:
             logger.debug(f"LLM response received, content length: {len(content) if content else 0}")
 
             # ── Step 3: Parse JSON from the response content ──
-            data = self._extract_json(content)
+            data = extract_json_from_llm_response(content)
             if data is None:
                 logger.error("Could not extract valid JSON from LLM response for JD")
                 return self._fallback_extraction(jd_text)
@@ -164,99 +165,6 @@ class JDUnderstanding:
         except Exception as e:
             logger.error(f"JD extraction failed: {e}")
             return self._fallback_extraction(jd_text)
-
-    def _extract_json(self, text: str) -> Optional[dict]:
-        """
-        Extract JSON from LLM response, handling markdown and formatting.
-
-        Called by: extract()
-        Calls: _try_parse_json()
-
-        Strategy (tried in order):
-            1. Direct json.loads() on the full text
-            2. Look for ```json ... ``` markdown code blocks
-            3. Find the outermost { ... } brace pair via regex
-
-        Args:
-            text: Raw LLM response text
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        if not text:
-            logger.debug("_extract_json received empty text")
-            return None
-
-        # Strategy 1: Try direct JSON parse (ideal case - LLM returned pure JSON)
-        try:
-            logger.debug("Attempting direct JSON parse of LLM response")
-            return json.loads(text)
-        except json.JSONDecodeError:
-            logger.debug("Direct JSON parse failed, trying markdown extraction")
-            pass
-
-        # Strategy 2: Look for JSON inside markdown code blocks (```json ... ```)
-        json_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-        if json_block:
-            raw = json_block.group(1).strip()
-            logger.debug(f"Found markdown JSON block, length: {len(raw)}")
-            parsed = self._try_parse_json(raw)
-            if parsed is not None:
-                return parsed
-
-        # Strategy 3: Find outermost braces and try to parse that substring
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            logger.debug("Attempting brace-match JSON extraction")
-            parsed = self._try_parse_json(brace_match.group(0))
-            if parsed is not None:
-                return parsed
-
-        logger.debug("All JSON extraction strategies failed")
-        return None
-
-    def _try_parse_json(self, raw: str) -> Optional[dict]:
-        """
-        Try to parse JSON with fixups for common LLM issues.
-
-        Called by: _extract_json()
-
-        Strategies:
-            1. Direct parse
-            2. Remove trailing commas before } or ] (common LLM mistake)
-            3. Truncate from the end to find the last valid closing brace
-
-        Args:
-            raw: Raw JSON string to parse
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        # Attempt 1: Direct parse
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 2: Fix trailing commas (e.g., {"a": 1,} → {"a": 1})
-        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
-        try:
-            logger.debug("Trying JSON parse after removing trailing commas")
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 3: Truncate from end to find last valid JSON object
-        # This handles cases where LLM appends extra text after the JSON
-        for i in range(len(raw) - 1, 0, -1):
-            if raw[i] == "}":
-                try:
-                    return json.loads(raw[: i + 1])
-                except json.JSONDecodeError:
-                    continue
-
-        logger.debug("All JSON parse attempts failed for this raw string")
-        return None
 
     def _parse_response(self, data: dict, raw_text: str) -> JobDescription:
         """

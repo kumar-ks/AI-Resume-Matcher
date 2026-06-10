@@ -154,6 +154,8 @@ def ensure_ollama_running(model: str) -> None:
                 print(f"\n  WARNING: Model '{model_name}' not found locally.")
                 print(f"  Pulling model (this may take a few minutes on first run)...")
                 subprocess.run(["ollama", "pull", model_name], check=False)
+            # Warm up the model (load into memory) to avoid cold-start timeouts
+            _warmup_ollama_model(model_name)
             return
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
@@ -197,6 +199,43 @@ def ensure_ollama_running(model: str) -> None:
     print("\n  ERROR: Could not start Ollama server after 10 seconds.")
     print("  Try starting it manually: ollama serve")
     sys.exit(1)
+
+
+def _warmup_ollama_model(model_name: str) -> None:
+    """
+    Warm up an Ollama model by sending a tiny request to pre-load it into memory.
+
+    Ollama unloads models from GPU/RAM after idle time. The first real request
+    after unload takes 30-60s just to reload. This warmup forces the model to
+    load AND sets keep_alive to prevent unloading during the pipeline run.
+
+    Called by: ensure_ollama_running()
+    """
+    import httpx
+
+    try:
+        print(f"  Warming up model '{model_name}' (loading into memory)...")
+        # Send a minimal generate request with keep_alive to prevent model unloading.
+        # keep_alive="30m" keeps the model loaded for 30 minutes (enough for any pipeline run).
+        with httpx.Client(verify=False, timeout=180.0) as client:
+            response = client.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": model_name,
+                    "prompt": "hi",
+                    "stream": False,
+                    "keep_alive": "30m",  # Keep model in memory for 30 minutes
+                },
+            )
+            if response.status_code == 200:
+                print(f"  ✓ Model '{model_name}' is warm and ready (keep_alive=30m)")
+                logger.info(f"Ollama model '{model_name}' warmed up, keep_alive=30m")
+            else:
+                logger.warning(f"Warmup got status {response.status_code}, proceeding anyway")
+    except Exception as e:
+        # Non-fatal — pipeline will still work, just first call may be slow
+        logger.warning(f"Model warmup failed (non-fatal): {e}")
+        print(f"  ⚠️  Warmup skipped (first LLM call may be slow)")
 
 
 def parse_args():
@@ -433,7 +472,8 @@ async def run_matching(args):
 
     # ── Step 2.5: Token estimation (pre-flight budget check) ──────────────────
     # Estimates total tokens needed BEFORE running the pipeline.
-    # Warns if inputs exceed model context window or cost is high.
+    # For paid models: shows cost estimate and token budget.
+    # For free models (Ollama): only checks context window limits.
     resume_texts = [f["text"] for f in resume_files]
     token_estimate = estimate_token_usage(
         jd_text=jd_text,
@@ -442,25 +482,26 @@ async def run_matching(args):
         explain_top_n=args.explain_top,
     )
 
-    print(f"\n  Token Budget Estimate:")
-    print(f"    Input tokens:  ~{token_estimate['total_input_tokens']:,}")
-    print(f"    Output tokens: ~{token_estimate['total_output_tokens']:,}")
-    print(f"    Total tokens:  ~{token_estimate['total_tokens']:,}")
-    print(f"    LLM calls:     {token_estimate['num_llm_calls']}")
-    print(f"    Context window: {token_estimate['context_window']:,} tokens ({args.model})")
-    if token_estimate['estimated_cost_usd'] > 0:
-        print(f"    Estimated cost: ${token_estimate['estimated_cost_usd']:.4f} USD")
-    else:
-        print(f"    Estimated cost: FREE (local model)")
+    is_paid_model = token_estimate['estimated_cost_usd'] > 0
 
-    # Display warnings if any
+    if is_paid_model:
+        # Show full token budget for paid models (cost matters)
+        print(f"\n  Token Budget Estimate (paid model):")
+        print(f"    Input tokens:  ~{token_estimate['total_input_tokens']:,}")
+        print(f"    Output tokens: ~{token_estimate['total_output_tokens']:,}")
+        print(f"    Total tokens:  ~{token_estimate['total_tokens']:,}")
+        print(f"    LLM calls:     {token_estimate['num_llm_calls']}")
+        print(f"    Context window: {token_estimate['context_window']:,} tokens")
+        print(f"    💰 Estimated cost: ${token_estimate['estimated_cost_usd']:.4f} USD")
+
+    # Display warnings (context window exceeded) — relevant for ALL models
     if token_estimate['warnings']:
-        print(f"\n  ⚠️  Warnings:")
+        print(f"\n  ⚠️  Context Window Warnings:")
         for w in token_estimate['warnings']:
             print(f"    - {w}")
 
     if not token_estimate['sufficient']:
-        print(f"\n  ERROR: Some inputs exceed the model's context window.")
+        print(f"\n  ERROR: Some inputs exceed the model's context window ({token_estimate['context_window']:,} tokens).")
         print(f"  Consider using a model with a larger context (e.g., gpt-4o, claude-3-sonnet)")
         print(f"  or reducing resume/JD size.")
         sys.exit(1)

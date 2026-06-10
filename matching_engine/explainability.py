@@ -36,9 +36,7 @@ FLOW:
     7. Return ExplainabilityReport to pipeline.py
 """
 
-import json
 import logging
-import re
 from typing import Optional
 
 import litellm
@@ -50,6 +48,7 @@ from matching_engine.models import (
     ScoringBreakdown,
     SemanticMatchResult,
 )
+from matching_engine.utils import extract_json_from_llm_response
 
 logger = logging.getLogger(__name__)
 
@@ -165,13 +164,14 @@ class ExplainabilityEngine:
                     }
                 ],
                 temperature=self.temperature,
+                timeout=300,  # 5 min — matches other stages for Ollama cold start
             )
 
             # ── Step 3: Extract and parse JSON from response ──
             content = response.choices[0].message.content
             logger.debug(f"LLM response received, content length: {len(content) if content else 0}")
 
-            data = self._extract_json(content)
+            data = extract_json_from_llm_response(content)
             if data is None:
                 logger.warning("Could not extract JSON from explainability response, using fallback")
                 return self._fallback_explanation(jd, resume, scoring)
@@ -183,98 +183,6 @@ class ExplainabilityEngine:
         except Exception as e:
             logger.error(f"Explainability generation failed: {e}")
             return self._fallback_explanation(jd, resume, scoring)
-
-    def _extract_json(self, text: str) -> Optional[dict]:
-        """
-        Extract JSON from LLM response, handling markdown and formatting.
-
-        Called by: explain()
-        Calls: _try_parse_json()
-
-        Strategy (tried in order):
-            1. Direct json.loads() on the full text
-            2. Look for ```json ... ``` markdown code blocks
-            3. Find the outermost { ... } brace pair via regex
-
-        Args:
-            text: Raw LLM response text
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        if not text:
-            logger.debug("_extract_json received empty text")
-            return None
-
-        # Strategy 1: Try direct JSON parse (ideal case)
-        try:
-            logger.debug("Attempting direct JSON parse of explainability response")
-            return json.loads(text)
-        except json.JSONDecodeError:
-            logger.debug("Direct JSON parse failed, trying markdown extraction")
-            pass
-
-        # Strategy 2: Look for JSON inside markdown code blocks
-        json_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-        if json_block:
-            raw = json_block.group(1).strip()
-            logger.debug(f"Found markdown JSON block, length: {len(raw)}")
-            parsed = self._try_parse_json(raw)
-            if parsed is not None:
-                return parsed
-
-        # Strategy 3: Find outermost braces and try to parse
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            logger.debug("Attempting brace-match JSON extraction")
-            parsed = self._try_parse_json(brace_match.group(0))
-            if parsed is not None:
-                return parsed
-
-        logger.debug("All JSON extraction strategies failed")
-        return None
-
-    def _try_parse_json(self, raw: str) -> Optional[dict]:
-        """
-        Try to parse JSON with fixups for common LLM issues.
-
-        Called by: _extract_json()
-
-        Strategies:
-            1. Direct parse
-            2. Remove trailing commas before } or ]
-            3. Truncate from end to find last valid closing brace
-
-        Args:
-            raw: Raw JSON string to parse
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        # Attempt 1: Direct parse
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 2: Fix trailing commas (common LLM mistake)
-        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
-        try:
-            logger.debug("Trying JSON parse after removing trailing commas")
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 3: Truncate from end to find last valid JSON object
-        for i in range(len(raw) - 1, 0, -1):
-            if raw[i] == "}":
-                try:
-                    return json.loads(raw[: i + 1])
-                except json.JSONDecodeError:
-                    continue
-
-        logger.debug("All JSON parse attempts failed for this raw string")
-        return None
 
     def _build_prompt(
         self,

@@ -15,6 +15,7 @@ Dependencies:
     - pydantic (data models)
 """
 
+from matching_engine.config import AppConfig
 from matching_engine.models import (
     JobDescription,
     ResumeProfile,
@@ -25,6 +26,7 @@ from matching_engine.models import (
 from matching_engine.pipeline import MatchingPipeline
 
 __all__ = [
+    "AppConfig",
     "JobDescription",
     "ResumeProfile",
     "MatchResult",

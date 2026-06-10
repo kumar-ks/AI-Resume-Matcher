@@ -42,9 +42,7 @@ Returns a ResumeProfile (Pydantic model) with:
   - raw_text (original input preserved)
 """
 
-import json
 import logging
-import re
 from typing import Optional
 
 import litellm
@@ -53,6 +51,13 @@ from matching_engine.models import (
     Project,
     ResumeProfile,
     WorkExperience,
+)
+from matching_engine.utils import (
+    extract_json_from_llm_response,
+    extract_name_from_text,
+    extract_email_from_text,
+    extract_phone_from_text,
+    estimate_experience_from_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,30 +222,24 @@ class ResumeUnderstanding:
 
         # --- Extract email ---
         # Pattern: standard email format (user@domain.tld)
-        email_match = re.search(
-            r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text
-        )
-        email = email_match.group(0) if email_match else None
-        logger.debug("Baseline email regex matched: %r", email)
+        email = extract_email_from_text(text)
+        logger.debug("Baseline email extracted: %r", email)
 
         # --- Extract phone ---
         # Pattern: optional country code, groups of 4-6 digits separated by
         # spaces or hyphens. Covers formats like +91 98765 43210, 123-4567-8901
-        phone_match = re.search(
-            r"(\+?\d{1,3}[\s\-]?\d{4,5}[\s\-]?\d{4,6})", text
-        )
-        phone = phone_match.group(0).strip() if phone_match else None
-        logger.debug("Baseline phone regex matched: %r", phone)
+        phone = extract_phone_from_text(text)
+        logger.debug("Baseline phone extracted: %r", phone)
 
         # --- Extract name ---
-        # Delegates to _extract_name_from_text which scans the first few lines
-        name = self._extract_name_from_text(text)
+        # Delegates to extract_name_from_text which scans the first few lines
+        name = extract_name_from_text(text)
         logger.debug("Baseline name extracted: %r", name)
 
         # --- Extract experience ---
-        # Delegates to _estimate_experience_from_text which uses multiple
+        # Delegates to estimate_experience_from_text which uses multiple
         # regex patterns to find phrases like "10+ years of experience"
-        experience = self._estimate_experience_from_text(text)
+        experience = estimate_experience_from_text(text)
         logger.debug("Baseline experience estimated: %s years", experience)
 
         return {
@@ -249,102 +248,6 @@ class ResumeUnderstanding:
             "phone": phone,
             "total_experience_years": experience,
         }
-
-    def _extract_name_from_text(self, text: str) -> str:
-        """
-        Extract candidate name from resume text.
-
-        Strategy:
-            1. Scan first 15 lines for a short line (2-4 words, all letters)
-               that isn't a section header.
-            2. If not found, scan first 30 lines for a line where most words
-               start with uppercase (typical name pattern).
-
-        Called by: _extract_baseline()
-        Calls:     nothing (leaf method)
-
-        Returns:
-            Extracted name string, or "" if no suitable line found
-        """
-        lines = text.strip().split("\n")
-
-        # Common resume section headers (normalized, no spaces, lowercase)
-        section_headers = {
-            "summary", "profile", "resume", "curriculum", "objective",
-            "career", "about", "contact", "experience", "education",
-            "skills", "certifications", "projects", "professional",
-            "references", "achievements", "highlights", "overview",
-            "keyskills", "technicalskills", "coreskills", "softskills",
-            "workexperience", "professionalexperience", "employmenthistory",
-            "careersummary", "careerobjective", "personaldetails",
-            "personalinfo", "declaration", "hobbies", "interests",
-            "languages", "awards", "publications", "training",
-        }
-
-        # ── Pass 1: Scan first 15 lines for a clean name line ──
-        for idx, line in enumerate(lines[:15]):
-            line = line.strip()
-            if not line:
-                continue
-
-            # Skip section headers (normalize spaces for OCR artifacts)
-            normalized = re.sub(r"\s+", "", line).lower()
-            if normalized in section_headers or any(
-                normalized.startswith(h) for h in section_headers
-            ):
-                continue
-
-            # Skip lines with email, phone, or URLs
-            if "@" in line or re.search(r"\d{5,}", line) or "http" in line.lower():
-                continue
-
-            # Skip lines that are too long (paragraph text)
-            if len(line) > 35:
-                continue
-
-            # Skip lines with dates, special chars (company entries like "BT Group Nov '22")
-            if re.search(r"['\"\d]{2,}|[-–—].*\d{2}", line):
-                continue
-
-            # Skip lines ending with dash/colon (job titles like "Director of Engineering -")
-            if line.endswith("-") or line.endswith(":") or line.endswith("–"):
-                continue
-
-            # A name: 2-4 words, each starts with uppercase, min 2 chars
-            words = line.split()
-            if 2 <= len(words) <= 4 and all(
-                re.match(r"^[A-Z][a-zA-Z.\-]*$", w) and len(w) >= 2 for w in words
-            ):
-                logger.debug("  Name found at line %d: %r", idx, line)
-                return line
-
-        # ── Pass 2: Broader scan (first 30 lines) for capitalized name pattern ──
-        for idx, line in enumerate(lines[:30]):
-            line = line.strip()
-            if not line or len(line) > 30 or len(line) < 5:
-                continue
-
-            # Skip section headers
-            normalized = re.sub(r"\s+", "", line).lower()
-            if normalized in section_headers or any(
-                normalized.startswith(h) for h in section_headers
-            ):
-                continue
-
-            # Skip lines with digits, email, special chars
-            if re.search(r"[\d@#$%&*(){}[\]]", line):
-                continue
-
-            # Look for 2-4 words where each starts with uppercase
-            words = line.split()
-            if 2 <= len(words) <= 4 and all(
-                re.match(r"^[A-Z][a-zA-Z.\-]*$", w) for w in words
-            ):
-                logger.debug("  Name found (pass 2) at line %d: %r", idx, line)
-                return line
-
-        logger.debug("_extract_name_from_text(): no name found")
-        return ""
 
     # =========================================================================
     # LLM EXTRACTION — async, with retries
@@ -387,6 +290,7 @@ class ResumeUnderstanding:
                     ],
                     temperature=self.temperature,
                     max_tokens=4096,
+                    timeout=300,  # 5 min — allows for Ollama cold start + generation
                 )
 
                 # Extract the text content from the LLM response
@@ -398,7 +302,7 @@ class ResumeUnderstanding:
                 )
 
                 # Attempt to parse JSON from the LLM's text response
-                data = self._extract_json(content)
+                data = extract_json_from_llm_response(content)
                 if data is None:
                     # JSON extraction failed — retry if attempts remain
                     if attempt < max_retries:
@@ -500,131 +404,6 @@ class ResumeUnderstanding:
             llm_profile.total_experience_years = baseline["total_experience_years"]
 
         return llm_profile
-
-    # =========================================================================
-    # JSON EXTRACTION — handles messy LLM output
-    # =========================================================================
-    def _extract_json(self, text: str) -> Optional[dict]:
-        """
-        Extract JSON from LLM response, handling markdown code blocks,
-        truncated responses, and other common formatting issues.
-
-        The LLM is instructed to return pure JSON, but in practice it may:
-          - Wrap it in ```json ... ``` markdown blocks
-          - Include preamble text before the JSON
-          - Truncate the response mid-JSON (token limit)
-          - Add trailing commas (invalid JSON)
-
-        This method tries multiple strategies in order of likelihood.
-
-        Called by: _extract_via_llm()
-        Calls:     _try_parse_json()
-
-        Args:
-            text: Raw LLM response string
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        if not text:
-            logger.debug("_extract_json(): received empty text, returning None")
-            return None
-
-        # Strategy 1: Direct parse — the ideal case (LLM returned clean JSON)
-        try:
-            result = json.loads(text)
-            logger.debug("_extract_json(): direct json.loads() succeeded")
-            return result
-        except json.JSONDecodeError:
-            logger.debug("_extract_json(): direct parse failed, trying alternatives")
-
-        # Strategy 2: Extract from markdown code block ```json ... ``` or ``` ... ```
-        json_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-        if json_block:
-            raw = json_block.group(1).strip()
-            logger.debug(
-                "_extract_json(): found markdown code block, length=%d", len(raw)
-            )
-            parsed = self._try_parse_json(raw)
-            if parsed is not None:
-                logger.debug("_extract_json(): markdown block parse succeeded")
-                return parsed
-            logger.debug("_extract_json(): markdown block parse failed")
-
-        # Strategy 3: Find the first { ... } block (greedy, handles preamble text)
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            raw = brace_match.group(0)
-            logger.debug(
-                "_extract_json(): found brace block, length=%d", len(raw)
-            )
-            parsed = self._try_parse_json(raw)
-            if parsed is not None:
-                logger.debug("_extract_json(): brace block parse succeeded")
-                return parsed
-            logger.debug("_extract_json(): brace block parse failed")
-
-        logger.debug("_extract_json(): all strategies exhausted, returning None")
-        return None
-
-    def _try_parse_json(self, raw: str) -> Optional[dict]:
-        """
-        Try to parse JSON, with fixups for common LLM issues.
-
-        Attempts in order:
-          1. Direct json.loads()
-          2. Remove trailing commas before } or ] (common LLM mistake)
-          3. Truncation recovery: try parsing up to each } from the end
-             (handles responses cut off by token limits)
-
-        Called by: _extract_json()
-        Calls:     nothing (leaf method)
-
-        Args:
-            raw: A string that should contain JSON (possibly malformed)
-
-        Returns:
-            Parsed dict if any strategy works, None otherwise
-        """
-        # Attempt 1: Direct parse
-        try:
-            result = json.loads(raw)
-            logger.debug("_try_parse_json(): direct parse succeeded")
-            return result
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 2: Remove trailing commas before } or ]
-        # e.g., {"a": 1, "b": 2,} → {"a": 1, "b": 2}
-        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
-        try:
-            result = json.loads(fixed)
-            logger.debug("_try_parse_json(): trailing-comma fix succeeded")
-            return result
-        except json.JSONDecodeError:
-            pass
-
-        # Attempt 3: Truncation recovery
-        # Walk backwards through the string, try parsing at each } position.
-        # This handles cases where the LLM response was cut off mid-JSON.
-        logger.debug(
-            "_try_parse_json(): attempting truncation recovery (string length=%d)",
-            len(raw),
-        )
-        for i in range(len(raw) - 1, 0, -1):
-            if raw[i] == "}":
-                try:
-                    result = json.loads(raw[: i + 1])
-                    logger.debug(
-                        "_try_parse_json(): truncation recovery succeeded at position %d",
-                        i,
-                    )
-                    return result
-                except json.JSONDecodeError:
-                    continue
-
-        logger.debug("_try_parse_json(): all parse attempts failed")
-        return None
 
     # =========================================================================
     # RESPONSE PARSING — converts LLM dict → ResumeProfile model
@@ -740,7 +519,7 @@ class ResumeUnderstanding:
             )
         if total_experience_years is None:
             # Last resort: regex patterns on raw text
-            total_experience_years = self._estimate_experience_from_text(raw_text)
+            total_experience_years = estimate_experience_from_text(raw_text)
             logger.debug(
                 "_parse_response(): estimated from raw text=%s",
                 total_experience_years,
@@ -828,77 +607,4 @@ class ResumeUnderstanding:
             return years
 
         logger.debug("_estimate_experience(): no months accumulated, returning None")
-        return None
-
-    # =========================================================================
-    # EXPERIENCE ESTIMATION — from raw text via regex
-    # =========================================================================
-    def _estimate_experience_from_text(self, raw_text: str) -> Optional[float]:
-        """
-        Fallback: extract experience years from raw resume text using patterns.
-
-        Handles phrases like:
-          - '10+ years of experience'
-          - 'over 12 years in IT'
-          - 'approximately 8 yrs experience'
-          - 'experience of 15+ years'
-          - 'decade of experience'
-
-        Sanity check: only accepts values between 1 and 50 years.
-
-        Called by: _extract_baseline(), _parse_response()
-        Calls:     nothing (leaf method)
-
-        Args:
-            raw_text: Original resume text to scan
-
-        Returns:
-            Experience years as float, or None if no pattern matched
-        """
-        if not raw_text:
-            return None
-
-        logger.debug(
-            "_estimate_experience_from_text(): scanning %d chars of text",
-            len(raw_text),
-        )
-
-        # Each pattern targets a different phrasing style commonly found in resumes
-        patterns = [
-            # "10+ years of experience" / "10 years experience"
-            r"(\d+)\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience|exp)",
-            # "over 12 years" / "more than 8 years"
-            r"(?:over|more than|approximately|around|nearly)\s*(\d+)\s*(?:years?|yrs?)",
-            # "10+ years in IT" / "8 years in software"
-            r"(\d+)\+?\s*(?:years?|yrs?)\s*(?:in\s+(?:IT|software|engineering|industry))",
-            # "experience of 15+ years"
-            r"experience\s*(?:of\s+)?(\d+)\+?\s*(?:years?|yrs?)",
-            # "10+ years of professional experience"
-            r"(\d+)\+?\s*years?\s*(?:of\s+)?(?:professional|total|overall|hands-on)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, raw_text, re.IGNORECASE)
-            if match:
-                years = float(match.group(1))
-                if 1 <= years <= 50:  # sanity check
-                    logger.debug(
-                        "_estimate_experience_from_text(): pattern %r matched, years=%.1f",
-                        pattern, years,
-                    )
-                    return years
-                else:
-                    logger.debug(
-                        "_estimate_experience_from_text(): pattern %r matched but value %.1f outside 1-50 range",
-                        pattern, years,
-                    )
-
-        # Handle "decade" / "plus decade" as a special case (= 10 years)
-        if re.search(r"(?:over|plus)?\s*decade\s*(?:of\s+)?experience", raw_text, re.IGNORECASE):
-            logger.debug(
-                "_estimate_experience_from_text(): 'decade' pattern matched, returning 10.0"
-            )
-            return 10.0
-
-        logger.debug("_estimate_experience_from_text(): no patterns matched")
         return None

@@ -65,26 +65,23 @@ class MatchingPipeline:
         embedding_model: str = "all-MiniLM-L6-v2",
         scoring_weights: Optional[dict[str, float]] = None,
         temperature: float = 0.1,
+        concurrency: int = 3,
+        explain_top_n: Optional[int] = None,
     ):
         """
         Initialize the matching pipeline with all stage engines.
 
         Called by: run.py → run_matching()
 
-        Creates instances of:
-            - JDUnderstanding (Stage 1): LLM-based JD parsing
-            - ResumeUnderstanding (Stage 2): LLM + regex resume parsing
-            - SemanticMatcher (Stage 3): Embedding model for similarity
-            - Scorer (Stage 4): Weighted scoring formula
-            - ExplainabilityEngine (Stage 5): LLM-based explanation generation
-
         Args:
             model: LiteLLM model identifier for LLM stages (e.g., "ollama/llama3")
             embedding_model: Sentence-transformers model for semantic matching
             scoring_weights: Custom scoring weights dict (optional, defaults to standard)
             temperature: LLM temperature for extraction stages (lower = more deterministic)
+            concurrency: Max resumes to process in parallel (default: 3)
+            explain_top_n: Only generate LLM explanations for top N candidates (None = all)
         """
-        logger.debug(f"Initializing pipeline: model={model}, embeddings={embedding_model}")
+        logger.debug(f"Initializing pipeline: model={model}, embeddings={embedding_model}, concurrency={concurrency}")
 
         # Stage 1 engine: Extracts structured requirements from JD text
         self.jd_understanding = JDUnderstanding(model=model, temperature=temperature)
@@ -93,7 +90,6 @@ class MatchingPipeline:
         self.resume_understanding = ResumeUnderstanding(model=model, temperature=temperature)
 
         # Stage 3 engine: Computes embedding-based similarity scores
-        # Note: This pre-loads the embedding model (may take a few seconds on first run)
         self.semantic_matcher = SemanticMatcher(embedding_model=embedding_model)
 
         # Stage 4 engine: Computes weighted qualification percentage
@@ -102,9 +98,18 @@ class MatchingPipeline:
         # Stage 5 engine: Generates human-readable match explanations
         self.explainability = ExplainabilityEngine(model=model, temperature=0.3)
 
+        # Performance settings
+        # Ollama can only process one request at a time (single GPU inference).
+        # Force concurrency=1 for Ollama to avoid timeouts from queued requests.
+        if model.startswith("ollama/") and concurrency > 1:
+            logger.info(f"Ollama detected — setting concurrency=1 (Ollama processes sequentially)")
+            concurrency = 1
+        self.concurrency = concurrency
+        self.explain_top_n = explain_top_n
+
         logger.info(
             f"MatchingPipeline initialized (LLM: {model}, "
-            f"Embeddings: {embedding_model})"
+            f"Embeddings: {embedding_model}, Concurrency: {concurrency})"
         )
 
     async def match(
@@ -114,10 +119,13 @@ class MatchingPipeline:
         jd: Optional[JobDescription] = None,
     ) -> list[MatchResult]:
         """
-        Run the full matching pipeline for multiple candidates.
+        Run the full matching pipeline for multiple candidates with concurrency.
 
         Called by: run.py → run_matching()
-        Calls: self.jd_understanding.extract(), self._process_single_resume()
+
+        Performance:
+            - Stages 2-4 run in parallel (bounded by self.concurrency)
+            - Stage 5 runs sequentially AFTER sorting (only for top N)
 
         Args:
             jd_text: Raw job description text
@@ -127,32 +135,65 @@ class MatchingPipeline:
         Returns:
             List of MatchResult sorted by qualification_percentage (highest first)
         """
-        logger.info(f"Starting pipeline: 1 JD x {len(resume_texts)} resumes")
+        import asyncio
+        import time
+
+        start_time = time.time()
+        logger.info(f"Starting pipeline: 1 JD x {len(resume_texts)} resumes (concurrency={self.concurrency})")
 
         # ── Stage 1: JD Understanding ────────────────────────────────────────
-        # Parse the job description into structured requirements
         if jd is None:
             jd = await self.jd_understanding.extract(jd_text)
         logger.info(f"JD parsed: {jd.title} ({len(jd.must_have_skills)} must-have skills)")
         logger.debug(f"  Must-have skills: {[s.name for s in jd.must_have_skills]}")
-        logger.debug(f"  Good-to-have skills: {[s.name for s in jd.good_to_have_skills]}")
         logger.debug(f"  Experience range: {jd.experience_range_min}-{jd.experience_range_max} years")
 
-        # ── Stages 2-6: Process each resume ──────────────────────────────────
-        results: list[MatchResult] = []
-        for i, resume_text in enumerate(resume_texts, 1):
-            logger.info(f"Processing resume {i}/{len(resume_texts)}")
-            result = await self._process_single_resume(jd, resume_text)
-            results.append(result)
+        # ── Stages 2-4: Process resumes concurrently ─────────────────────────
+        semaphore = asyncio.Semaphore(self.concurrency)
 
-        # ── Sort results by score (highest first) ────────────────────────────
+        async def process_with_limit(idx: int, text: str) -> MatchResult:
+            async with semaphore:
+                logger.info(f"Processing resume {idx}/{len(resume_texts)}")
+                return await self._process_single_resume(jd, text)
+
+        tasks = [process_with_limit(i, text) for i, text in enumerate(resume_texts, 1)]
+        results: list[MatchResult] = await asyncio.gather(*tasks)
+
+        # ── Sort by score before Stage 5 ─────────────────────────────────────
         results.sort(key=lambda r: r.qualification_percentage, reverse=True)
 
+        # ── Stage 5: Explainability (only for top N to save time) ────────────
+        explain_count = self.explain_top_n or len(results)
+        logger.info(f"Generating explanations for top {explain_count} candidates")
+
+        for result in results[:explain_count]:
+            explanation = await self.explainability.explain(
+                jd, result.candidate, result.scoring_breakdown, result.semantic_scores
+            )
+            result.explainability = explanation
+            result.key_strengths = explanation.matched_strengths
+            result.missing_skills = explanation.missing_skills
+            result.reasoning = explanation.reason_for_score
+            result.recommendation = explanation.recommendation
+
+        # Fallback explanation for remaining candidates
+        for result in results[explain_count:]:
+            explanation = self.explainability._fallback_explanation(
+                jd, result.candidate, result.scoring_breakdown
+            )
+            result.explainability = explanation
+            result.key_strengths = explanation.matched_strengths
+            result.missing_skills = explanation.missing_skills
+            result.reasoning = explanation.reason_for_score
+            result.recommendation = explanation.recommendation
+
+        elapsed = time.time() - start_time
         if results:
             logger.info(
-                f"Pipeline complete. Top match: "
+                f"Pipeline complete in {elapsed:.1f}s. Top: "
                 f"{results[0].candidate.full_name} ({results[0].qualification_percentage}%)"
             )
+        print(f"\n  ⏱  Pipeline completed in {elapsed:.1f} seconds ({len(resume_texts)} resumes)")
 
         return results
 
@@ -217,7 +258,7 @@ class MatchingPipeline:
         # ── Stage 4: Scoring ─────────────────────────────────────────────────
         # Calculate weighted qualification percentage
         scoring = self.scorer.score(jd, resume, semantic_result)
-        logger.info(f"  Score: {scoring.qualification_percentage}%")
+        logger.info(f"  Score: {scoring.qualification_percentage}% ({resume.full_name})")
         logger.debug(
             f"    Breakdown: must_have={scoring.must_have_match:.2f}, "
             f"exp={scoring.experience_match:.2f}, "
@@ -226,25 +267,19 @@ class MatchingPipeline:
             f"recency={scoring.recency_factor:.2f}"
         )
 
-        # ── Stage 5: Explainability ──────────────────────────────────────────
-        # Generate human-readable reasoning for the score
-        explanation = await self.explainability.explain(
-            jd, resume, scoring, semantic_result
-        )
-        logger.debug(f"    Recommendation: {explanation.recommendation}")
-
-        # ── Stage 6: Output — Assemble final MatchResult ─────────────────────
+        # ── Return result (Stage 5 explainability runs later, after sorting) ─
+        from matching_engine.models import ExplainabilityReport
         return MatchResult(
             candidate=resume,
             job_description=jd,
             qualification_percentage=scoring.qualification_percentage,
             semantic_scores=semantic_result,
             scoring_breakdown=scoring,
-            explainability=explanation,
-            key_strengths=explanation.matched_strengths,
-            missing_skills=explanation.missing_skills,
-            reasoning=explanation.reason_for_score,
-            recommendation=explanation.recommendation,
+            explainability=ExplainabilityReport(),
+            key_strengths=[],
+            missing_skills=[],
+            reasoning="",
+            recommendation="",
         )
 
     async def match_with_parsed_inputs(
