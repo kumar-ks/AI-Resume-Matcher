@@ -202,6 +202,12 @@ class ResumeUnderstanding:
             merged.full_name, merged.email,
             len(merged.skills), len(merged.work_experiences),
         )
+
+        # Step 4: Chunked extraction for work experiences (if LLM missed entries)
+        # This is an ENHANCEMENT — it only runs if we detect the resume has more
+        # experience entries than what the LLM extracted. It does NOT affect scoring.
+        merged = await self._enhance_work_experiences(merged, resume_text)
+
         return merged
 
     # =========================================================================
@@ -608,3 +614,228 @@ class ResumeUnderstanding:
 
         logger.debug("_estimate_experience(): no months accumulated, returning None")
         return None
+
+    # =========================================================================
+    # CHUNKED EXTRACTION — supplements work experiences for large resumes
+    # =========================================================================
+
+    # Prompt specifically for extracting ONLY work experience entries.
+    # Shorter output = less likely to be truncated by the LLM.
+    EXPERIENCE_CHUNK_PROMPT = """Extract ALL work experiences from this resume text. Return a JSON array.
+
+Each entry must have:
+{{
+    "company": "company name",
+    "title": "job title",
+    "start_year": number or null,
+    "end_year": number or null,
+    "is_current": boolean,
+    "technologies": ["tech1", "tech2"],
+    "responsibilities": ["resp1", "resp2", "resp3"]
+}}
+
+Resume text (EXPERIENCE section only):
+---
+{experience_text}
+---
+
+Return ONLY a JSON array [...], no markdown, no explanation."""
+
+    async def _enhance_work_experiences(
+        self, profile: ResumeProfile, raw_text: str
+    ) -> ResumeProfile:
+        """
+        Enhance work experiences by sending ONLY the experience section to the LLM.
+
+        This is a SUPPLEMENTARY step that runs AFTER the main extraction.
+        It only triggers if the resume appears to have more experience entries
+        than what was initially extracted (detected via year-pattern counting).
+
+        The existing profile data (name, skills, scoring fields) is NEVER modified.
+        Only work_experiences[] may be replaced with a more complete list.
+
+        Called by: extract() as Step 4
+        Does NOT affect: scoring, semantic matching, or any pipeline stage
+
+        Args:
+            profile: The merged ResumeProfile from Steps 1-3
+            raw_text: The full raw resume text
+
+        Returns:
+            The same profile with potentially more complete work_experiences
+        """
+        import re
+
+        # Count how many experience entries the resume likely has
+        # (by counting year patterns like "2020", "2023 - Present", etc.)
+        year_patterns = re.findall(r"(19|20)\d{2}", raw_text)
+        estimated_entries = len(year_patterns) // 2  # Each entry has ~2 years (start + end)
+
+        current_entries = len(profile.work_experiences)
+
+        # Only run chunked extraction if we're clearly missing entries
+        if current_entries >= estimated_entries or estimated_entries <= 2:
+            logger.debug(
+                f"Chunked extraction skipped: have {current_entries} entries, "
+                f"estimated {estimated_entries} in text"
+            )
+            return profile
+
+        logger.info(
+            f"Chunked extraction triggered: have {current_entries} entries, "
+            f"estimated {estimated_entries} in text. Extracting experience section..."
+        )
+
+        # Extract the experience section from the raw text
+        experience_text = self._extract_experience_section(raw_text)
+        if not experience_text or len(experience_text) < 50:
+            logger.debug("Could not isolate experience section, skipping chunked extraction")
+            return profile
+
+        # Send just the experience section to the LLM (smaller input = complete output)
+        try:
+            response = await litellm.acompletion(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self.EXPERIENCE_CHUNK_PROMPT.format(
+                            experience_text=experience_text
+                        ),
+                    }
+                ],
+                temperature=self.temperature,
+                max_tokens=4096,
+                timeout=300,
+            )
+
+            content = response.choices[0].message.content
+            data = extract_json_from_llm_response(content)
+
+            # The response should be a list (JSON array) of experience dicts
+            if data is None:
+                # Try parsing as array directly
+                import json
+                try:
+                    # Handle case where response is a raw JSON array
+                    if content and content.strip().startswith("["):
+                        data = json.loads(content.strip())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if data is None:
+                logger.warning("Chunked extraction failed to produce valid JSON")
+                return profile
+
+            # If data is a dict with a "work_experiences" key, extract it
+            if isinstance(data, dict):
+                entries = data.get("work_experiences", data.get("experiences", []))
+            elif isinstance(data, list):
+                entries = data
+            else:
+                return profile
+
+            # Parse the entries into WorkExperience objects
+            new_experiences = []
+            for exp in entries:
+                if not isinstance(exp, dict):
+                    continue
+                try:
+                    new_experiences.append(
+                        WorkExperience(
+                            company=exp.get("company") or "",
+                            title=exp.get("title") or "",
+                            duration_months=exp.get("duration_months"),
+                            start_year=exp.get("start_year"),
+                            end_year=exp.get("end_year"),
+                            is_current=exp.get("is_current", False),
+                            technologies=[
+                                t for t in (exp.get("technologies") or [])
+                                if isinstance(t, str)
+                            ],
+                            responsibilities=[
+                                r for r in (exp.get("responsibilities") or [])
+                                if isinstance(r, str)
+                            ],
+                            domain=exp.get("domain"),
+                        )
+                    )
+                except Exception:
+                    continue
+
+            # Only replace if we got MORE entries than before
+            if len(new_experiences) > current_entries:
+                logger.info(
+                    f"Chunked extraction succeeded: {current_entries} → {len(new_experiences)} entries"
+                )
+                profile.work_experiences = new_experiences
+            else:
+                logger.debug(
+                    f"Chunked extraction got {len(new_experiences)} entries "
+                    f"(not more than existing {current_entries}), keeping original"
+                )
+
+        except Exception as e:
+            logger.warning(f"Chunked experience extraction failed: {e}")
+
+        return profile
+
+    def _extract_experience_section(self, raw_text: str) -> str:
+        """
+        Extract just the EXPERIENCE/WORK HISTORY section from raw resume text.
+
+        Uses section header detection to isolate the experience portion,
+        reducing the input size for the chunked LLM call.
+
+        Returns:
+            The experience section text, or empty string if not found.
+        """
+        import re
+
+        lines = raw_text.split("\n")
+        experience_start = None
+        experience_end = None
+
+        # Find where experience section starts
+        experience_headers = [
+            "experience", "professional experience", "work experience",
+            "employment history", "work history", "career history",
+        ]
+
+        for i, line in enumerate(lines):
+            normalized = re.sub(r"\s+", " ", line).strip().lower()
+            if any(normalized == h or normalized.startswith(h) for h in experience_headers):
+                experience_start = i
+                break
+
+        if experience_start is None:
+            # Fallback: look for first year pattern as start of experience
+            for i, line in enumerate(lines):
+                if re.search(r"(19|20)\d{2}\s*[-–—]\s*(present|(19|20)\d{2})", line, re.IGNORECASE):
+                    experience_start = max(0, i - 1)
+                    break
+
+        if experience_start is None:
+            return ""
+
+        # Find where experience section ends (next major section header)
+        end_headers = [
+            "education", "certifications", "projects", "publications",
+            "awards", "skills", "references", "interests", "hobbies",
+        ]
+
+        for i in range(experience_start + 1, len(lines)):
+            normalized = re.sub(r"\s+", " ", lines[i]).strip().lower()
+            if any(normalized == h or normalized.startswith(h) for h in end_headers):
+                experience_end = i
+                break
+
+        if experience_end is None:
+            experience_end = len(lines)
+
+        experience_text = "\n".join(lines[experience_start:experience_end])
+        logger.debug(
+            f"Extracted experience section: lines {experience_start}-{experience_end}, "
+            f"{len(experience_text)} chars"
+        )
+        return experience_text

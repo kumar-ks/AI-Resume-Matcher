@@ -39,6 +39,7 @@ import yaml
 from matching_engine.file_loader import extract_text, load_files_from_directory
 from matching_engine.llm_client import LLMClient, validate_llm_access, estimate_token_usage
 from matching_engine.pipeline import MatchingPipeline
+from matching_engine.template_renderer import render_top_candidates
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG FILE PATH
@@ -335,6 +336,13 @@ Folder structure:
         default=None,
         help="Only generate AI explanations for top N candidates (saves ~15s per skipped resume). "
              "Default: explain all. Recommended for large batches: --explain-top 10",
+    )
+    parser.add_argument(
+        "--generate-doc",
+        type=int,
+        default=None,
+        help="Generate formatted DOCX for top N candidates using the template. "
+             "Output saved to rendered/ folder. Example: --generate-doc 3",
     )
     return parser.parse_args()
 
@@ -732,6 +740,34 @@ async def run_matching(args):
         print(f"\n\nResults saved to: {args.output}")
         print(f"  → {len(results)} candidates mapped to their source resume files")
         print(f"  → Use 'source_file' / 'source_path' fields to link UI back to resumes")
+
+    # ── Step 10: Generate formatted DOCX if --generate-doc specified ──────────
+    generate_count = getattr(args, "generate_doc", None)
+    if generate_count:
+        # Find the template file
+        template_dir = Path("template")
+        template_files = list(template_dir.glob("*.docx")) if template_dir.exists() else []
+
+        if not template_files:
+            print("\n  ⚠️  No DOCX template found in template/ folder. Skipping doc generation.")
+        else:
+            template_path = template_files[0]  # Use first template found
+            output_dir = Path("rendered")
+
+            print(f"\n  Generating formatted documents (top {generate_count})...")
+            print(f"  Template: {template_path.name}")
+            print(f"  Output folder: {output_dir}/")
+
+            rendered = render_top_candidates(
+                results=results,
+                source_filenames=text_to_file,
+                template_path=template_path,
+                output_dir=output_dir,
+                top_n=generate_count,
+            )
+
+            if rendered:
+                print(f"\n  ✓ Generated {len(rendered)} formatted document(s) in '{output_dir}/'")
 
 
 def main():

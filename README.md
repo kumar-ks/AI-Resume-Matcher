@@ -14,6 +14,7 @@ AI-powered Resume to Job Description matching engine with a 6-stage pipeline. Us
 - [Model Failover](#model-failover)
 - [Scoring Weights — Design Rationale](#scoring-weights--design-rationale)
 - [JSON Output (for UI)](#json-output-for-ui)
+- [Template-Based Resume Generation (`--generate-doc`)](#template-based-resume-generation---generate-doc)
 - [Framework Architecture](#framework-architecture)
 - [Execution Flow (Sequence of Calls)](#execution-flow-sequence-of-calls)
 - [File-by-File Summary](#file-by-file-summary)
@@ -84,6 +85,9 @@ python run.py --output results.json
 
 # Debug mode (verbose logging)
 python run.py --debug
+
+# Generate formatted DOCX for top 3 candidates (uses template/ folder)
+python run.py --generate-doc 3
 ```
 
 ### What happens when you run the script
@@ -171,6 +175,7 @@ debug: false            # Enable verbose logging
 | `--output` | none | `output_file` | Save results to JSON file |
 | `--concurrency` | 3 | `concurrency` | Parallel resume processing count |
 | `--explain-top` | all | `explain_top` | Only AI-explain top N candidates |
+| `--generate-doc` | none | — | Generate formatted DOCX for top N candidates |
 | `--debug` | off | `debug` | Enable DEBUG-level logging |
 
 ---
@@ -407,6 +412,66 @@ python run.py --output results.json
 
 ---
 
+## Template-Based Resume Generation (`--generate-doc`)
+
+After the pipeline ranks candidates, you can auto-generate formatted DOCX documents using your company's resume template.
+
+### How it works
+
+1. **Template is read-only** — Your template in `template/` is never modified.
+2. **Data is filled** — Candidate profile data from Stage 2 (name, contact, skills, experience, education, certifications) is populated into a fresh copy of the template.
+3. **Output is saved** — Formatted documents are saved to `rendered/` folder with naming: `{rank}_Antern_{original_filename}.docx`
+
+### Usage
+
+```bash
+# Generate formatted DOCX for the top candidate only
+python run.py --generate-doc 1
+
+# Generate for top 3 candidates
+python run.py --generate-doc 3
+
+# Combine with other options
+python run.py --model ollama/qwen2 --generate-doc 3 --output results.json
+```
+
+### Output structure
+
+```
+rendered/
+├── 1_Antern_DevSecOps_MLOps_v3.docx          ← Rank #1
+├── 2_Antern_Kumar_DevSecOps_MLOps_v1.docx    ← Rank #2
+└── 3_Antern_Jyothi Kancharla.docx            ← Rank #3
+```
+
+### What gets filled in each document
+
+| Template section | Data source |
+|-----------------|-------------|
+| NAME | `ResumeProfile.full_name` (uppercase) |
+| Contact / Email | `ResumeProfile.phone`, `email`, `location` |
+| PROFESSIONAL SUMMARY | `ResumeProfile.career_summary` |
+| TECHNICAL SKILLS | `ResumeProfile.skills[]` (comma-separated) |
+| EXPERIENCE | `ResumeProfile.work_experiences[]` (title, company, dates, responsibilities) |
+| EDUCATION | `ResumeProfile.education[]` |
+| CERTIFICATIONS | `ResumeProfile.certifications[]` |
+
+### Setup
+
+Place your company's DOCX template in the `template/` folder:
+
+```
+AI-Resume-Matcher/
+├── template/
+│   └── YourTemplate.docx    ← Any .docx file (first one found is used)
+├── rendered/                 ← Output folder (auto-created, git-ignored)
+└── ...
+```
+
+The template should have section headers (PROFESSIONAL SUMMARY, TECHNICAL SKILLS, EXPERIENCE, EDUCATION, CERTIFICATIONS) as markers. The renderer locates these headers and fills content below them, preserving all formatting (fonts, sizes, colors, styles).
+
+---
+
 ## Framework Architecture
 
 ### High-Level Architecture Diagram
@@ -541,16 +606,24 @@ AI-Resume-Matcher/
 │   └── .gitkeep
 ├── jd/                                 ← Place JD file here (PDF/DOCX/TXT)
 │   └── .gitkeep
+├── template/                           ← Place your DOCX template here (read-only)
+│   └── YourTemplate.docx
+├── rendered/                           ← Generated formatted docs (auto-created, git-ignored)
+│   └── 1_Antern_CandidateName.docx
 └── matching_engine/                    ← Core framework package
     ├── __init__.py
     ├── models.py                       ← Pydantic data models
+    ├── config.py                       ← Pydantic-based AppConfig (settings validation)
+    ├── utils.py                        ← Shared utilities (JSON parsing, text extraction)
     ├── file_loader.py                  ← Text extraction (PDF/DOCX/TXT, OCR, text boxes)
+    ├── llm_client.py                   ← LLM client with failover + token estimation
     ├── jd_understanding.py             ← Stage 1: LLM-based JD parsing
     ├── resume_understanding.py         ← Stage 2: Regex + LLM resume parsing
     ├── semantic_matching.py            ← Stage 3: Embedding similarity (6 dimensions)
     ├── scoring.py                      ← Stage 4: Weighted scoring formula
     ├── explainability.py               ← Stage 5: LLM explanation + rule-based fallback
     ├── pipeline.py                     ← Pipeline orchestrator (concurrent stages)
+    ├── template_renderer.py            ← DOCX template rendering (--generate-doc)
     └── example_usage.py                ← Demo script with sample data
 ```
 

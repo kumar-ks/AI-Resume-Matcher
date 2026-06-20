@@ -67,3 +67,9 @@ resumes/*
 !resumes/.gitkeep
 jd/*
 !jd/.gitkeep
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rendered documents (generated output — do NOT commit)
+# ─────────────────────────────────────────────────────────────────────────────
+rendered/
