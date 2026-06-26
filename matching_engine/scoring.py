@@ -408,16 +408,15 @@ class Scorer:
 
     def _fuzzy_skill_match(self, skill: str, candidate_skills: set[str]) -> bool:
         """
-        Check if a skill matches any candidate skill with fuzzy logic.
+        Check if a skill matches any candidate skill using the Knowledge Graph.
 
         Called by: _score_must_have_match(), _score_skills_depth()
 
-        Handles common variations like abbreviations, framework versions, etc.
-
-        Matching strategies (tried in order):
-            1. Exact match in candidate skills set
-            2. Substring containment (either direction)
-            3. Known abbreviation/alias lookup table
+        Uses the SkillGraph ontology for intelligent matching:
+            1. Exact match
+            2. KG alias lookup (k8s ↔ kubernetes)
+            3. KG relationship traversal (Kubeflow → MLOps)
+            4. Substring containment (fallback)
 
         Args:
             skill: Lowercased skill name to search for
@@ -426,38 +425,7 @@ class Scorer:
         Returns:
             True if skill matches any candidate skill
         """
-        # Strategy 1: Exact match
-        if skill in candidate_skills:
-            return True
+        from matching_engine.knowledge_graph import get_skill_graph
 
-        # Strategy 2: Substring containment (e.g., "react" in "reactjs")
-        for cs in candidate_skills:
-            if skill in cs or cs in skill:
-                return True
-
-        # Strategy 3: Known abbreviation/alias lookup
-        # Maps canonical skill names to sets of known variations
-        abbreviations = {
-            "javascript": {"js", "javascript", "ecmascript"},
-            "typescript": {"ts", "typescript"},
-            "python": {"python", "py"},
-            "kubernetes": {"kubernetes", "k8s"},
-            "react": {"react", "reactjs", "react.js"},
-            "node": {"node", "nodejs", "node.js"},
-            "aws": {"aws", "amazon web services"},
-            "gcp": {"gcp", "google cloud", "google cloud platform"},
-            "azure": {"azure", "microsoft azure"},
-            "docker": {"docker", "containerization"},
-            "ci/cd": {"ci/cd", "cicd", "ci cd", "continuous integration"},
-            "sql": {"sql", "mysql", "postgresql", "postgres"},
-            "nosql": {"nosql", "mongodb", "dynamodb", "cassandra"},
-            "microservices": {"microservices", "micro-services", "micro services"},
-            "spring boot": {"spring boot", "springboot", "spring-boot"},
-        }
-
-        for canonical, variants in abbreviations.items():
-            if skill in variants:
-                if any(cs in variants or canonical in cs for cs in candidate_skills):
-                    return True
-
-        return False
+        kg = get_skill_graph()
+        return kg.fuzzy_match(skill, candidate_skills)

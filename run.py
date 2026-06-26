@@ -40,6 +40,9 @@ from matching_engine.file_loader import extract_text, load_files_from_directory
 from matching_engine.llm_client import LLMClient, validate_llm_access, estimate_token_usage
 from matching_engine.pipeline import MatchingPipeline
 from matching_engine.template_renderer import render_top_candidates
+from matching_engine.database import ProfileDatabase
+from matching_engine.vector_store import VectorStore
+from matching_engine.scanner import scan_and_ingest
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG FILE PATH
@@ -343,6 +346,37 @@ Folder structure:
         default=None,
         help="Generate formatted DOCX for top N candidates using the template. "
              "Output saved to rendered/ folder. Example: --generate-doc 3",
+    )
+    # ── Database & Scanner flags ──────────────────────────────────────────────
+    parser.add_argument(
+        "--ingest",
+        action="store_true",
+        default=False,
+        help="Ingest resumes into the database (extract via LLM and store). "
+             "Only processes new/modified files (skips already-ingested ones).",
+    )
+    parser.add_argument(
+        "--match",
+        action="store_true",
+        default=False,
+        help="Match against stored profiles in DB (fast, no re-extraction). "
+             "Requires --ingest to have been run at least once.",
+    )
+    parser.add_argument(
+        "--scan-mode",
+        type=str,
+        default=None,
+        choices=["db_first", "folder_only", "db_only"],
+        help="How to find candidates: "
+             "db_first (default: DB + scan new files), "
+             "folder_only (bypass DB, scan folder fresh), "
+             "db_only (only use DB, fastest).",
+    )
+    parser.add_argument(
+        "--db-status",
+        action="store_true",
+        default=False,
+        help="Display database and vector store status, then exit.",
     )
     return parser.parse_args()
 
@@ -834,10 +868,384 @@ def main():
     if args.failover_model:
         ensure_ollama_running(args.failover_model)
 
-    # Set environment variable to skip remote model cost map fetch (avoids SSL issues)
-    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    # Load .env file if present (API keys, secrets)
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        logger.debug(f"Loading environment variables from {env_path}")
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    os.environ.setdefault(key.strip(), value.strip())
 
-    asyncio.run(run_matching(args))
+    # Set environment variables to handle corporate proxy SSL issues (Zscaler)
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    # Disable SSL verification for litellm/httpx (Zscaler proxy rewrites certs)
+    os.environ.setdefault("LITELLM_SSL_VERIFY", "False")
+    os.environ.setdefault("SSL_VERIFY", "False")
+
+    # ── Merge database/scanner config ─────────────────────────────────────────
+    if config:
+        args.db_path = config.get("db_path", "./data/profiles.db")
+        args.vector_store_path = config.get("vector_store_path", "./data/chroma")
+        args.scanned_files_path = config.get("scanned_files_path", "./data/scanned_files")
+        if args.scan_mode is None:
+            args.scan_mode = config.get("scan_mode", "db_first")
+    else:
+        args.db_path = "./data/profiles.db"
+        args.vector_store_path = "./data/chroma"
+        args.scanned_files_path = "./data/scanned_files"
+        if args.scan_mode is None:
+            args.scan_mode = "db_first"
+
+    # ── Route to the correct execution mode ───────────────────────────────────
+    if args.db_status:
+        # Show database status and exit
+        _show_db_status(args)
+    elif args.ingest and not args.match:
+        # Ingest-only mode: scan resumes into DB
+        asyncio.run(_run_ingest(args))
+    elif args.match:
+        # Match mode: query DB for candidates, score against JD
+        if args.ingest:
+            # --ingest --match: ingest first, then match
+            asyncio.run(_run_ingest_and_match(args))
+        else:
+            asyncio.run(_run_match_from_db(args))
+    else:
+        # Default: original behavior (based on scan_mode)
+        if args.scan_mode == "folder_only":
+            # Bypass DB — run the original stateless pipeline
+            asyncio.run(run_matching(args))
+        elif args.scan_mode == "db_only":
+            # Only match from DB (requires prior ingest)
+            asyncio.run(_run_match_from_db(args))
+        else:
+            # "db_first" (default): ingest new files + match from DB
+            asyncio.run(_run_ingest_and_match(args))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW EXECUTION MODES
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _show_db_status(args) -> None:
+    """Display database and vector store status, then exit."""
+    db = ProfileDatabase(args.db_path, args.scanned_files_path)
+    vs = VectorStore(args.vector_store_path)
+
+    db_status = db.get_status()
+    vs_status = vs.get_status()
+
+    print("\n" + "=" * 50)
+    print("DATABASE STATUS")
+    print("=" * 50)
+    print(f"  SQLite DB:       {db_status['db_path']}")
+    print(f"  Profiles stored: {db_status['profile_count']}")
+    print(f"  DB size:         {db_status['db_size_mb']} MB")
+    print(f"  Scanned files:   {db_status['scanned_files_count']}")
+    print(f"\n  Vector Store:    {vs_status['persist_path']}")
+    print(f"  Embeddings:      {vs_status['embedding_count']}")
+    print(f"  Collection:      {vs_status['collection_name']}")
+    print("=" * 50)
+
+    db.close()
+
+
+async def _run_ingest(args) -> None:
+    """Ingest resumes into the database (--ingest mode)."""
+    print("\n" + "=" * 50)
+    print("INGEST MODE — Scanning resumes into database")
+    print("=" * 50)
+
+    db = ProfileDatabase(args.db_path, args.scanned_files_path)
+    vs = VectorStore(args.vector_store_path)
+
+    result = await scan_and_ingest(
+        resumes_dir=args.resumes,
+        db=db,
+        vector_store=vs,
+        model=args.model,
+        temperature=0.1,
+    )
+
+    print(f"\n  Ingest complete:")
+    print(f"    New profiles:    {result['new_count']}")
+    print(f"    Skipped (in DB): {result['skipped_count']}")
+    print(f"    Failed:          {result['failed_count']}")
+    print(f"    Total in DB:     {result['total_in_db']}")
+    print(f"    Time:            {result['elapsed_seconds']}s")
+
+    db.close()
+
+
+async def _run_match_from_db(args) -> None:
+    """
+    Match mode: Query stored profiles from DB against a JD (--match mode).
+
+    Fast — no LLM extraction needed for resumes (already in DB).
+    Only JD extraction uses LLM (one call).
+    """
+    from matching_engine.jd_understanding import JDUnderstanding
+    from matching_engine.scoring import Scorer
+    from matching_engine.explainability import ExplainabilityEngine
+    from matching_engine.semantic_matching import SemanticMatcher
+    from matching_engine.models import MatchResult, ExplainabilityReport
+
+    print("\n" + "=" * 50)
+    print("MATCH MODE — Scoring stored profiles against JD")
+    print("=" * 50)
+
+    # ── Load JD ───────────────────────────────────────────────────────────────
+    jd_text = load_jd(args)
+    print(f"  JD loaded: {len(jd_text)} characters")
+
+    # ── Load profiles from DB ─────────────────────────────────────────────────
+    db = ProfileDatabase(args.db_path, args.scanned_files_path)
+    vs = VectorStore(args.vector_store_path)
+
+    profile_count = db.get_profile_count()
+    if profile_count == 0:
+        print("\n  ERROR: No profiles in database. Run --ingest first.")
+        print("    python run.py --ingest")
+        db.close()
+        return
+
+    print(f"  Profiles in DB: {profile_count}")
+
+    # ── Stage 1: Extract JD requirements (one LLM call) ──────────────────────
+    print(f"  Extracting JD requirements...")
+    jd_understanding = JDUnderstanding(model=args.model, temperature=0.1)
+    jd = await jd_understanding.extract(jd_text)
+    print(f"  JD parsed: {jd.title} ({len(jd.must_have_skills)} must-have skills)")
+
+    # ── Query vector store for top candidates (semantic pre-filter) ───────────
+    top_n_query = min(50, profile_count)  # Pre-filter top 50 by embedding similarity
+    print(f"  Querying vector store for top {top_n_query} similar profiles...")
+
+    similar_results = vs.query_similar(jd_text, top_n=top_n_query)
+
+    if similar_results:
+        # Get the file hashes of top candidates
+        top_hashes = {r["file_hash"] for r in similar_results}
+        # Load full profiles for these candidates
+        all_profiles_meta = db.get_all_profiles_with_metadata()
+        candidates = [p for p in all_profiles_meta if p["file_hash"] in top_hashes]
+    else:
+        # Fallback: use all profiles from DB
+        candidates = db.get_all_profiles_with_metadata()
+
+    print(f"  Candidates to score: {len(candidates)}")
+
+    # ── Stages 3-4: Score each candidate (fast, no LLM needed) ────────────────
+    print(f"  Scoring candidates...")
+    scorer = Scorer()
+    semantic_matcher = SemanticMatcher(embedding_model=args.embedding_model)
+
+    results: list[MatchResult] = []
+    for cand in candidates:
+        profile = cand["profile"]
+        semantic_result = semantic_matcher.match(jd, profile)
+        scoring = scorer.score(jd, profile, semantic_result)
+
+        results.append(MatchResult(
+            candidate=profile,
+            job_description=jd,
+            qualification_percentage=scoring.qualification_percentage,
+            semantic_scores=semantic_result,
+            scoring_breakdown=scoring,
+            explainability=ExplainabilityReport(),
+            key_strengths=[],
+            missing_skills=[],
+            reasoning="",
+            recommendation="",
+        ))
+
+    # ── Sort by score ─────────────────────────────────────────────────────────
+    results.sort(key=lambda r: r.qualification_percentage, reverse=True)
+
+    # ── Stage 5: Explain top N ────────────────────────────────────────────────
+    explain_count = args.explain_top or min(5, len(results))
+    print(f"  Generating explanations for top {explain_count}...")
+    explainability = ExplainabilityEngine(model=args.model, temperature=0.3)
+
+    for result in results[:explain_count]:
+        explanation = await explainability.explain(
+            jd, result.candidate, result.scoring_breakdown, result.semantic_scores
+        )
+        result.explainability = explanation
+        result.key_strengths = explanation.matched_strengths
+        result.missing_skills = explanation.missing_skills
+        result.reasoning = explanation.reason_for_score
+        result.recommendation = explanation.recommendation
+
+    # Fallback for remaining
+    for result in results[explain_count:]:
+        explanation = explainability._fallback_explanation(
+            jd, result.candidate, result.scoring_breakdown
+        )
+        result.explainability = explanation
+        result.key_strengths = explanation.matched_strengths
+        result.missing_skills = explanation.missing_skills
+        result.reasoning = explanation.reason_for_score
+        result.recommendation = explanation.recommendation
+
+    # ── Display results (reuse existing display logic) ────────────────────────
+    # Build text_to_file mapping from DB metadata
+    text_to_file = {
+        cand["profile"].raw_text: {"filename": cand["source_file"], "path": cand["source_path"]}
+        for cand in candidates
+    }
+
+    # Apply top-N filter
+    if args.top:
+        results = results[:args.top]
+
+    _display_results(results, text_to_file)
+
+    # Save JSON if requested
+    if args.output:
+        _save_json_output(results, text_to_file, args)
+
+    db.close()
+    print(f"\n  ✓ Match complete ({len(results)} candidates scored from DB)")
+
+
+async def _run_ingest_and_match(args) -> None:
+    """
+    Combined mode: Ingest new files, then match all from DB (--ingest --match or default db_first).
+    """
+    # First ingest any new files
+    db = ProfileDatabase(args.db_path, args.scanned_files_path)
+    vs = VectorStore(args.vector_store_path)
+
+    print("\n  Checking for new resumes to ingest...")
+    result = await scan_and_ingest(
+        resumes_dir=args.resumes,
+        db=db,
+        vector_store=vs,
+        model=args.model,
+        temperature=0.1,
+    )
+
+    if result["new_count"] > 0:
+        print(f"  Ingested {result['new_count']} new resumes. Total in DB: {result['total_in_db']}")
+    else:
+        print(f"  No new resumes. DB has {result['total_in_db']} profiles.")
+
+    db.close()
+
+    # Then run match from DB
+    await _run_match_from_db(args)
+
+
+def _display_results(results: list, text_to_file: dict) -> None:
+    """Display the results table (extracted from run_matching for reuse)."""
+    print("\n" + "=" * 180)
+    print("RESULTS — Candidate Match Grid (sorted by % Qualified)")
+    print("=" * 180)
+
+    header = (
+        f"{'#':<3} "
+        f"{'Source File':<30} "
+        f"{'First Name':<12} "
+        f"{'Middle':<8} "
+        f"{'Last Name':<15} "
+        f"{'Contact Number':<18} "
+        f"{'Email':<28} "
+        f"{'Exp(Yrs)':<9} "
+        f"{'% Match':<8} "
+        f"{'Key Skills (Top 3)':<35} "
+        f"{'Action'}"
+    )
+    print(header)
+    print("-" * 180)
+
+    for i, result in enumerate(results, 1):
+        c = result.candidate
+        file_info = text_to_file.get(c.raw_text, {"filename": f"unknown_{i}", "path": ""})
+        source_file = file_info["filename"]
+        if len(source_file) > 28:
+            source_file = source_file[:25] + "..."
+
+        first_name = c.first_name or "-"
+        middle_name = c.middle_name or "-"
+        last_name = c.last_name or "-"
+        phone = c.phone or "N/A"
+        email = c.email or "N/A"
+        exp = f"{c.total_experience_years}" if c.total_experience_years else "N/A"
+        score = f"{result.qualification_percentage}%"
+
+        top_skills = ", ".join(c.skills[:3]) if c.skills else "N/A"
+        if len(top_skills) > 33:
+            top_skills = top_skills[:30] + "..."
+
+        action = result.recommendation or "N/A"
+        action = (
+            action.replace("Strong Fit - ", "✅ ")
+            .replace("Good Fit - ", "👍 ")
+            .replace("Partial Fit - ", "⚠️  ")
+            .replace("Weak Fit - ", "❌ ")
+        )
+
+        row = (
+            f"{i:<3} "
+            f"{source_file:<30} "
+            f"{first_name:<12} "
+            f"{middle_name:<8} "
+            f"{last_name:<15} "
+            f"{phone:<18} "
+            f"{email:<28} "
+            f"{exp:<9} "
+            f"{score:<8} "
+            f"{top_skills:<35} "
+            f"{action}"
+        )
+        print(row)
+
+    print("=" * 180)
+
+
+def _save_json_output(results: list, text_to_file: dict, args) -> None:
+    """Save results to JSON file."""
+    import json
+
+    output_data = {
+        "metadata": {
+            "jd_file": str(Path(args.jd).name) if args.jd else "auto-detected",
+            "total_candidates": len(results),
+            "model_used": args.model,
+            "scan_mode": args.scan_mode,
+        },
+        "candidates": [],
+    }
+
+    for rank, r in enumerate(results, 1):
+        file_info = text_to_file.get(r.candidate.raw_text, {"filename": "unknown", "path": ""})
+        output_data["candidates"].append({
+            "rank": rank,
+            "source_file": file_info["filename"],
+            "source_path": file_info["path"],
+            "first_name": r.candidate.first_name or None,
+            "middle_name": r.candidate.middle_name or None,
+            "last_name": r.candidate.last_name or None,
+            "full_name": r.candidate.full_name or None,
+            "contact_number": r.candidate.phone or None,
+            "email": r.candidate.email or None,
+            "total_experience_years": r.candidate.total_experience_years,
+            "qualification_percentage": r.qualification_percentage,
+            "action": r.recommendation,
+            "reasoning": r.reasoning,
+            "key_skills_top_5": r.candidate.skills[:5],
+            "matched_strengths": r.key_strengths,
+            "missing_skills": r.missing_skills,
+        })
+
+    with open(args.output, "w") as f:
+        json.dump(output_data, f, indent=2, ensure_ascii=False)
+    print(f"\n  Results saved to: {args.output}")
 
 
 if __name__ == "__main__":

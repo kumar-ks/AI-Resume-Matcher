@@ -14,8 +14,14 @@
 #   OpenAI:   gpt-4, gpt-4o, gpt-3.5-turbo
 #   Anthropic: anthropic/claude-3-sonnet-20240229, anthropic/claude-3-opus-20240229
 #   AWS:      bedrock/anthropic.claude-3-sonnet
-model: "anthropic/claude-3-sonnet-20240229"
-failover_model: "ollama/llama3"
+
+#model: "anthropic/claude-3-sonnet-20240229"
+#failover_model: "ollama/llama3"
+
+# config.yaml — just set Ollama as primary
+model: "ollama/llama3"
+failover_model: null    # No failover needed
+
 
 # ── Embedding Model ──────────────────────────────────────────────────────────
 # Sentence-transformers model for semantic matching (Stage 3).
@@ -55,3 +61,15 @@ scoring_weights:
 output_file: null       # Set to "results.json" to always export
 top_n: null             # Show only top N (null = show all)
 debug: false            # Enable verbose logging
+
+# ── Database & Scanner ────────────────────────────────────────────────────────
+# Storage paths for the persistent resume database
+db_path: "./data/profiles.db"              # SQLite profile storage
+vector_store_path: "./data/chroma"         # ChromaDB embedding storage
+scanned_files_path: "./data/scanned_files" # Copies of processed resumes
+
+# scan_mode controls how matching finds candidates:
+#   "db_first"    — Search DB first, then scan folder for new files (DEFAULT)
+#   "folder_only" — Bypass DB, scan folder directly (fresh extraction every time)
+#   "db_only"     — Only use DB, never scan folder (fastest)
+scan_mode: "db_first"
