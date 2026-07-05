@@ -73,9 +73,9 @@ async def scan_and_ingest(
         logger.error(f"Resumes directory not found: {resumes_dir}")
         return {"new_count": 0, "skipped_count": 0, "failed_count": 0, "total_in_db": 0, "elapsed_seconds": 0}
 
-    # ── Step 1: Find all supported files (recursively) ──────────────────────────
+    # ── Step 1: Find all supported files ──────────────────────────────────────
     all_files = sorted(
-        f for f in resumes_dir.rglob("*")
+        f for f in resumes_dir.iterdir()
         if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
     )
     logger.info(f"Scanner found {len(all_files)} resume files in {resumes_dir}")
