@@ -42,7 +42,13 @@ class JobDescription(BaseModel):
 
     Stage 1 output: JD Understanding extracts these fields from
     raw JD text (PDF/DOCX/plain text).
+
+    Multi-tenant fields:
+        client_id: The client this JD belongs to (NDA isolation boundary)
+        job_id: Unique identifier for this job opening
     """
+    client_id: str = ""
+    job_id: str = ""
     title: str = ""
     must_have_skills: list[Skill] = Field(default_factory=list)
     good_to_have_skills: list[Skill] = Field(default_factory=list)
@@ -85,7 +91,15 @@ class ResumeProfile(BaseModel):
 
     Stage 2 output: Resume Understanding extracts these fields
     from raw resume text.
+
+    Multi-tenant fields:
+        client_id: The client this resume belongs to (NDA isolation boundary).
+                   Resumes under one client_id CANNOT be shared with another client.
+        job_id: The job opening this resume was ingested for.
+                Resumes can be shared across job_ids within the SAME client.
     """
+    client_id: str = ""
+    job_id: str = ""
     first_name: str = ""
     middle_name: Optional[str] = None
     last_name: str = ""

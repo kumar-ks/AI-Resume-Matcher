@@ -5,13 +5,18 @@ Async Resume Scanner
 Scans resume files, extracts profiles via LLM, and stores them in
 the database + vector store. Runs asynchronously (non-blocking).
 
+MULTI-TENANT:
+    - Requires client_id and job_id for every ingest operation
+    - All stored profiles and embeddings are tagged with these identifiers
+    - Deduplication is scoped to the client (same file can exist under different clients)
+
 RESPONSIBILITIES:
     - Detect new/modified resume files in the resumes folder
     - Extract profiles via the existing Stage 2 (ResumeUnderstanding)
-    - Store extracted profiles in SQLite (database.py)
-    - Store embeddings in ChromaDB (vector_store.py)
+    - Store extracted profiles in SQLite (database.py) with client_id/job_id
+    - Store embeddings in ChromaDB (vector_store.py) with client_id/job_id
     - Copy processed resume files to scanned_files/
-    - Skip files already processed (by file hash)
+    - Skip files already processed for this client (by file hash)
 
 CALLED BY:
     - run.py → --ingest mode (explicit scan)
@@ -25,7 +30,6 @@ ASYNC:
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 from matching_engine.database import ProfileDatabase
 from matching_engine.file_loader import extract_text, SUPPORTED_EXTENSIONS
@@ -39,49 +43,55 @@ async def scan_and_ingest(
     resumes_dir: str | Path,
     db: ProfileDatabase,
     vector_store: VectorStore,
+    client_id: str,
+    job_id: str,
     model: str = "ollama/llama3",
     temperature: float = 0.1,
 ) -> dict:
     """
     Scan a directory for resume files and ingest new/modified ones into the DB.
 
-    This is the main entry point for the async scanner. It:
-    1. Lists all supported files in the directory
-    2. Checks which ones are already in the DB (by file hash)
-    3. Processes only new/modified files (LLM extraction)
-    4. Stores profiles in SQLite + embeddings in ChromaDB
-
     Args:
         resumes_dir: Path to the folder containing resume files
         db: ProfileDatabase instance (SQLite)
         vector_store: VectorStore instance (ChromaDB)
+        client_id: Client identifier (NDA isolation boundary) — REQUIRED
+        job_id: Job opening identifier — REQUIRED
         model: LLM model to use for extraction (from config)
         temperature: LLM temperature
 
     Returns:
-        dict with:
-            - new_count: Number of newly ingested resumes
-            - skipped_count: Number of already-processed resumes
-            - failed_count: Number of files that failed processing
-            - total_in_db: Total profiles in DB after ingest
-            - elapsed_seconds: Time taken
+        dict with new_count, skipped_count, failed_count, total_in_db,
+        elapsed_seconds, client_id, job_id
+
+    Raises:
+        ValueError: If client_id or job_id is empty
     """
+    if not client_id or not client_id.strip():
+        raise ValueError("client_id is required for ingest (NDA enforcement)")
+    if not job_id or not job_id.strip():
+        raise ValueError("job_id is required for ingest")
+
     start_time = time.time()
     resumes_dir = Path(resumes_dir)
 
     if not resumes_dir.exists():
         logger.error(f"Resumes directory not found: {resumes_dir}")
-        return {"new_count": 0, "skipped_count": 0, "failed_count": 0, "total_in_db": 0, "elapsed_seconds": 0}
+        return {
+            "new_count": 0, "skipped_count": 0, "failed_count": 0,
+            "total_in_db": 0, "elapsed_seconds": 0,
+            "client_id": client_id, "job_id": job_id,
+        }
 
-    # ── Step 1: Find all supported files (recursively) ──────────────────────────
+    # ── Step 1: Find all supported files ──────────────────────────────────────
     all_files = sorted(
         f for f in resumes_dir.rglob("*")
         if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
     )
     logger.info(f"Scanner found {len(all_files)} resume files in {resumes_dir}")
 
-    # ── Step 2: Determine which files need processing ─────────────────────────
-    ingested_hashes = db.get_ingested_hashes()
+    # ── Step 2: Determine which files need processing (scoped to client) ──────
+    ingested_hashes = db.get_ingested_hashes(client_id)
     files_to_process = []
     skipped = 0
 
@@ -89,13 +99,13 @@ async def scan_and_ingest(
         file_hash = ProfileDatabase.compute_file_hash(file_path)
         if file_hash in ingested_hashes:
             skipped += 1
-            logger.debug(f"Skipping (already in DB): {file_path.name}")
+            logger.debug(f"Skipping (already in DB for client={client_id}): {file_path.name}")
         else:
             files_to_process.append((file_path, file_hash))
 
     logger.info(
-        f"Scanner: {len(files_to_process)} new files to process, "
-        f"{skipped} already in DB"
+        f"Scanner: {len(files_to_process)} new files to process for "
+        f"client={client_id}, job={job_id}. {skipped} already in DB."
     )
 
     if not files_to_process:
@@ -103,8 +113,10 @@ async def scan_and_ingest(
             "new_count": 0,
             "skipped_count": skipped,
             "failed_count": 0,
-            "total_in_db": db.get_profile_count(),
+            "total_in_db": db.get_profile_count(client_id),
             "elapsed_seconds": round(time.time() - start_time, 1),
+            "client_id": client_id,
+            "job_id": job_id,
         }
 
     # ── Step 3: Process each new file ─────────────────────────────────────────
@@ -127,8 +139,11 @@ async def scan_and_ingest(
             # Extract structured profile via LLM (Stage 2)
             profile = await resume_extractor.extract(raw_text)
 
-            # Quality check: reject clearly-failed extractions
-            # A valid profile should have at least a name OR skills OR experience
+            # Tag profile with client_id and job_id
+            profile.client_id = client_id.strip()
+            profile.job_id = job_id.strip()
+
+            # Quality check
             has_name = bool(profile.full_name.strip())
             has_skills = len(profile.skills) > 0
             has_experience = profile.total_experience_years is not None
@@ -138,24 +153,26 @@ async def scan_and_ingest(
                     f"  ⚠️  Low-quality extraction for {file_path.name} "
                     f"(no name, no skills, no experience). Storing with raw text only."
                 )
-                # Still store — but use the raw text for embedding so it's searchable
-                # The baseline regex may have caught phone/email even if LLM failed
 
-            # Store in SQLite
+            # Store in SQLite (with client_id and job_id)
             db.store_profile(
                 profile=profile,
                 source_file=file_path.name,
                 source_path=str(file_path),
                 file_hash=file_hash,
+                client_id=client_id.strip(),
+                job_id=job_id.strip(),
             )
 
-            # Build embedding text (combine key fields for better semantic search)
+            # Build embedding text
             embed_text = _build_embedding_text(profile)
 
-            # Store embedding in ChromaDB
+            # Store embedding in ChromaDB (with client_id and job_id)
             vector_store.store_embedding(
                 file_hash=file_hash,
                 text=embed_text,
+                client_id=client_id.strip(),
+                job_id=job_id.strip(),
                 metadata={
                     "source_file": file_path.name,
                     "full_name": profile.full_name,
@@ -173,11 +190,11 @@ async def scan_and_ingest(
 
     # ── Step 4: Report results ────────────────────────────────────────────────
     elapsed = round(time.time() - start_time, 1)
-    total_in_db = db.get_profile_count()
+    total_in_db = db.get_profile_count(client_id)
 
     logger.info(
         f"Scanner complete: {new_count} new, {skipped} skipped, "
-        f"{failed_count} failed. Total in DB: {total_in_db}. Time: {elapsed}s"
+        f"{failed_count} failed. Total in DB for client={client_id}: {total_in_db}. Time: {elapsed}s"
     )
 
     return {
@@ -186,6 +203,8 @@ async def scan_and_ingest(
         "failed_count": failed_count,
         "total_in_db": total_in_db,
         "elapsed_seconds": elapsed,
+        "client_id": client_id,
+        "job_id": job_id,
     }
 
 
@@ -198,8 +217,6 @@ def _build_embedding_text(profile) -> str:
     - Skills (searchable keywords)
     - Job titles + companies (role context)
     - Domain expertise
-
-    This text is what gets compared against JD text during similarity search.
     """
     parts = []
 
@@ -209,8 +226,7 @@ def _build_embedding_text(profile) -> str:
     if profile.skills:
         parts.append("Skills: " + ", ".join(profile.skills))
 
-    # Add job titles and companies
-    for exp in profile.work_experiences[:5]:  # Top 5 most recent
+    for exp in profile.work_experiences[:5]:
         if exp.title and exp.company:
             parts.append(f"{exp.title} at {exp.company}")
         if exp.technologies:
@@ -223,5 +239,4 @@ def _build_embedding_text(profile) -> str:
         parts.append("Certifications: " + ", ".join(profile.certifications))
 
     text = ". ".join(parts)
-    # Truncate to ChromaDB's embedding model limit
     return text[:2000]

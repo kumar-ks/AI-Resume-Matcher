@@ -378,6 +378,21 @@ Folder structure:
         default=False,
         help="Display database and vector store status, then exit.",
     )
+    # ── Multi-tenant isolation flags ──────────────────────────────────────────
+    parser.add_argument(
+        "--client-id",
+        type=str,
+        default=None,
+        help="Client identifier (NDA isolation boundary). REQUIRED for --ingest and --match. "
+             "Resumes under one client-id can NEVER be shared with another client.",
+    )
+    parser.add_argument(
+        "--job-id",
+        type=str,
+        default=None,
+        help="Job opening identifier. REQUIRED for --ingest and --match. "
+             "Resumes within the same client can be shared across job-ids.",
+    )
     return parser.parse_args()
 
 
@@ -927,6 +942,30 @@ def main():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MULTI-TENANT VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _validate_tenant_flags(args, mode: str = "ingest") -> None:
+    """
+    Validate that --client-id and --job-id are provided for DB operations.
+    These flags are mandatory for any mode that touches the DB (NDA enforcement).
+    """
+    missing = []
+    if not args.client_id:
+        missing.append("--client-id")
+    if not args.job_id:
+        missing.append("--job-id")
+
+    if missing:
+        print(f"\n  ERROR: {', '.join(missing)} required for --{mode} mode.")
+        print(f"  These flags enforce NDA-level client isolation.")
+        print(f"\n  Example:")
+        print(f"    python run.py --{mode} --client-id ACME_CORP --job-id JOB-2024-001")
+        sys.exit(1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NEW EXECUTION MODES
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -958,6 +997,8 @@ async def _run_ingest(args) -> None:
     """Ingest resumes into the database (--ingest mode)."""
     print("\n" + "=" * 50)
     print("INGEST MODE — Scanning resumes into database")
+    print(f"  Client ID: {args.client_id}")
+    print(f"  Job ID:    {args.job_id}")
     print("=" * 50)
 
     db = ProfileDatabase(args.db_path, args.scanned_files_path)
@@ -967,6 +1008,8 @@ async def _run_ingest(args) -> None:
         resumes_dir=args.resumes,
         db=db,
         vector_store=vs,
+        client_id=args.client_id,
+        job_id=args.job_id,
         model=args.model,
         temperature=0.1,
     )
@@ -1025,17 +1068,17 @@ async def _run_match_from_db(args) -> None:
     top_n_query = min(50, profile_count)  # Pre-filter top 50 by embedding similarity
     print(f"  Querying vector store for top {top_n_query} similar profiles...")
 
-    similar_results = vs.query_similar(jd_text, top_n=top_n_query)
+    similar_results = vs.query_similar(jd_text, client_id=args.client_id, top_n=top_n_query)
 
     if similar_results:
         # Get the file hashes of top candidates
         top_hashes = {r["file_hash"] for r in similar_results}
         # Load full profiles for these candidates
-        all_profiles_meta = db.get_all_profiles_with_metadata()
+        all_profiles_meta = db.get_all_profiles_with_metadata(args.client_id)
         candidates = [p for p in all_profiles_meta if p["file_hash"] in top_hashes]
     else:
         # Fallback: use all profiles from DB
-        candidates = db.get_all_profiles_with_metadata()
+        candidates = db.get_all_profiles_with_metadata(args.client_id)
 
     print(f"  Candidates to score: {len(candidates)}")
 

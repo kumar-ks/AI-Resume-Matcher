@@ -6,15 +6,17 @@ Manages persistent storage of extracted resume profiles in SQLite.
 Each resume is processed once (via LLM) and stored; subsequent matches
 read from DB instead of re-extracting.
 
-RESPONSIBILITIES:
-    - Store/retrieve ResumeProfile data (structured fields as JSON)
-    - Track which files have been ingested (via file hash)
-    - Detect new/modified files that need re-processing
-    - Store reference path to scanned resume copy
+MULTI-TENANT ISOLATION (NDA ENFORCEMENT):
+    - Every profile is tagged with client_id and job_id
+    - ALL read queries MUST filter by client_id
+    - Resumes under one client_id can NEVER be returned for another client
+    - Within the same client_id, resumes are shared across job_ids freely
 
 SCHEMA:
     resume_profiles:
         id              INTEGER PRIMARY KEY
+        client_id       TEXT NOT NULL  (NDA isolation boundary)
+        job_id          TEXT NOT NULL  (job opening identifier)
         source_file     TEXT    (original filename)
         source_path     TEXT    (original full path)
         file_hash       TEXT    (MD5 of file content — detect changes)
@@ -35,6 +37,10 @@ SCHEMA:
         domain_expertise TEXT   (JSON array)
         raw_text        TEXT
         extracted_at    TEXT    (ISO timestamp)
+
+    UNIQUE CONSTRAINT: (client_id, file_hash)
+        Same file CAN exist under different clients (separate ingest).
+        Same file CANNOT be duplicated within the same client.
 
 CALLED BY:
     - run.py → --ingest mode (writes profiles)
@@ -66,13 +72,16 @@ DEFAULT_SCANNED_FILES_PATH = Path("data/scanned_files")
 
 class ProfileDatabase:
     """
-    SQLite-based storage for extracted resume profiles.
+    SQLite-based storage for extracted resume profiles with client isolation.
+
+    STRICT RULE: All read operations require a client_id parameter.
+    Profiles from one client are NEVER visible to another client.
 
     Usage:
         db = ProfileDatabase(db_path="data/profiles.db")
-        db.store_profile(profile, source_file, source_path, file_hash)
-        profiles = db.get_all_profiles()
-        is_new = db.needs_processing(file_path)
+        db.store_profile(profile, source_file, source_path, file_hash, client_id="C1", job_id="J1")
+        profiles = db.get_all_profiles(client_id="C1")
+        is_new = db.needs_processing(file_path, client_id="C1")
     """
 
     def __init__(
@@ -106,9 +115,11 @@ class ProfileDatabase:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS resume_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
                 source_file TEXT NOT NULL,
                 source_path TEXT NOT NULL,
-                file_hash TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL,
                 scanned_copy TEXT,
                 first_name TEXT DEFAULT '',
                 middle_name TEXT,
@@ -125,8 +136,18 @@ class ProfileDatabase:
                 certifications TEXT DEFAULT '[]',
                 domain_expertise TEXT DEFAULT '[]',
                 raw_text TEXT DEFAULT '',
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                UNIQUE(client_id, file_hash)
             )
+        """)
+        # Indexes for fast client-scoped queries
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_profiles_client_id
+            ON resume_profiles(client_id)
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_profiles_client_job
+            ON resume_profiles(client_id, job_id)
         """)
         self.conn.commit()
         logger.debug("Database tables verified/created")
@@ -141,6 +162,8 @@ class ProfileDatabase:
         source_file: str,
         source_path: str,
         file_hash: str,
+        client_id: str,
+        job_id: str,
     ) -> int:
         """
         Store an extracted ResumeProfile in the database.
@@ -152,15 +175,27 @@ class ProfileDatabase:
             source_file: Original filename (e.g., "resume.pdf")
             source_path: Full path to original file
             file_hash: MD5 hash of file content
+            client_id: Client identifier (NDA isolation boundary) — REQUIRED
+            job_id: Job opening identifier — REQUIRED
 
         Returns:
             Row ID of the inserted record
+
+        Raises:
+            ValueError: If client_id or job_id is empty
         """
+        if not client_id or not client_id.strip():
+            raise ValueError("client_id is required for storing profiles (NDA enforcement)")
+        if not job_id or not job_id.strip():
+            raise ValueError("job_id is required for storing profiles")
+
         # Copy the resume file to scanned_files/
         scanned_copy = self._copy_to_scanned(source_path, file_hash, source_file)
 
         # Serialize complex fields to JSON
         data = (
+            client_id.strip(),
+            job_id.strip(),
             source_file,
             source_path,
             file_hash,
@@ -185,16 +220,20 @@ class ProfileDatabase:
 
         cursor = self.conn.execute("""
             INSERT OR REPLACE INTO resume_profiles (
+                client_id, job_id,
                 source_file, source_path, file_hash, scanned_copy,
                 first_name, middle_name, last_name, email, phone, location,
                 career_summary, skills, total_experience_years,
                 work_experiences, projects, education, certifications,
                 domain_expertise, raw_text, extracted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, data)
         self.conn.commit()
 
-        logger.info(f"Stored profile: {profile.full_name} ({source_file}) → id={cursor.lastrowid}")
+        logger.info(
+            f"Stored profile: {profile.full_name} ({source_file}) "
+            f"→ client={client_id}, job={job_id}, id={cursor.lastrowid}"
+        )
         return cursor.lastrowid
 
     def _copy_to_scanned(self, source_path: str, file_hash: str, filename: str) -> Optional[Path]:
@@ -213,30 +252,58 @@ class ProfileDatabase:
             return None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # READ OPERATIONS
+    # READ OPERATIONS — ALL FILTERED BY CLIENT_ID (NDA ENFORCEMENT)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_all_profiles(self) -> list[ResumeProfile]:
+    def get_all_profiles(self, client_id: str) -> list[ResumeProfile]:
         """
-        Retrieve all stored profiles from the database.
+        Retrieve all stored profiles for a specific client.
+
+        NDA ENFORCEMENT: Only returns profiles belonging to the given client_id.
+
+        Args:
+            client_id: The client whose profiles to retrieve
 
         Returns:
             List of ResumeProfile objects (deserialized from DB)
+
+        Raises:
+            ValueError: If client_id is empty
         """
-        cursor = self.conn.execute("SELECT * FROM resume_profiles ORDER BY id")
+        if not client_id or not client_id.strip():
+            raise ValueError("client_id is required for retrieving profiles (NDA enforcement)")
+
+        cursor = self.conn.execute(
+            "SELECT * FROM resume_profiles WHERE client_id = ? ORDER BY id",
+            (client_id.strip(),)
+        )
         rows = cursor.fetchall()
         profiles = [self._row_to_profile(row) for row in rows]
-        logger.debug(f"Retrieved {len(profiles)} profiles from database")
+        logger.debug(f"Retrieved {len(profiles)} profiles for client={client_id}")
         return profiles
 
-    def get_all_profiles_with_metadata(self) -> list[dict]:
+    def get_all_profiles_with_metadata(self, client_id: str) -> list[dict]:
         """
-        Retrieve all profiles with source file metadata.
+        Retrieve all profiles with source file metadata for a specific client.
+
+        NDA ENFORCEMENT: Only returns profiles belonging to the given client_id.
+
+        Args:
+            client_id: The client whose profiles to retrieve
 
         Returns:
-            List of dicts with 'profile', 'source_file', 'source_path', 'file_hash'
+            List of dicts with 'profile', 'source_file', 'source_path', 'file_hash', etc.
+
+        Raises:
+            ValueError: If client_id is empty
         """
-        cursor = self.conn.execute("SELECT * FROM resume_profiles ORDER BY id")
+        if not client_id or not client_id.strip():
+            raise ValueError("client_id is required for retrieving profiles (NDA enforcement)")
+
+        cursor = self.conn.execute(
+            "SELECT * FROM resume_profiles WHERE client_id = ? ORDER BY id",
+            (client_id.strip(),)
+        )
         rows = cursor.fetchall()
         results = []
         for row in rows:
@@ -245,42 +312,78 @@ class ProfileDatabase:
                 "source_file": row["source_file"],
                 "source_path": row["source_path"],
                 "file_hash": row["file_hash"],
+                "client_id": row["client_id"],
+                "job_id": row["job_id"],
                 "extracted_at": row["extracted_at"],
             })
         return results
 
-    def get_profile_count(self) -> int:
-        """Return total number of profiles in the database."""
-        cursor = self.conn.execute("SELECT COUNT(*) FROM resume_profiles")
+    def get_profile_count(self, client_id: Optional[str] = None) -> int:
+        """
+        Return number of profiles in the database.
+
+        Args:
+            client_id: If provided, count only for this client.
+                       If None, returns total count across ALL clients (for status display).
+        """
+        if client_id:
+            cursor = self.conn.execute(
+                "SELECT COUNT(*) FROM resume_profiles WHERE client_id = ?",
+                (client_id.strip(),)
+            )
+        else:
+            cursor = self.conn.execute("SELECT COUNT(*) FROM resume_profiles")
         return cursor.fetchone()[0]
 
-    def get_ingested_hashes(self) -> set[str]:
-        """Return set of all file hashes already in the database."""
-        cursor = self.conn.execute("SELECT file_hash FROM resume_profiles")
+    def get_ingested_hashes(self, client_id: str) -> set[str]:
+        """
+        Return set of all file hashes already in the database for a client.
+
+        NDA ENFORCEMENT: Only returns hashes belonging to the given client_id.
+
+        Args:
+            client_id: The client to check ingested files for
+
+        Raises:
+            ValueError: If client_id is empty
+        """
+        if not client_id or not client_id.strip():
+            raise ValueError("client_id is required for checking ingested hashes (NDA enforcement)")
+
+        cursor = self.conn.execute(
+            "SELECT file_hash FROM resume_profiles WHERE client_id = ?",
+            (client_id.strip(),)
+        )
         return {row[0] for row in cursor.fetchall()}
 
     # ─────────────────────────────────────────────────────────────────────────
     # FILE CHANGE DETECTION
     # ─────────────────────────────────────────────────────────────────────────
 
-    def needs_processing(self, file_path: str | Path) -> bool:
+    def needs_processing(self, file_path: str | Path, client_id: str) -> bool:
         """
-        Check if a file needs to be (re-)processed.
+        Check if a file needs to be (re-)processed for a specific client.
 
         Returns True if:
-            - File hash not in database (new file)
+            - File hash not in database for this client (new file)
             - File content has changed (hash mismatch)
+
+        Note: The same file CAN exist under different clients (separate ingest).
 
         Args:
             file_path: Path to the resume file to check
+            client_id: The client context for this check
 
         Returns:
-            True if the file should be processed, False if already in DB
+            True if the file should be processed, False if already in DB for this client
         """
         file_hash = self.compute_file_hash(file_path)
-        ingested = self.get_ingested_hashes()
+        ingested = self.get_ingested_hashes(client_id)
         needs = file_hash not in ingested
-        logger.debug(f"needs_processing({Path(file_path).name}): hash={file_hash[:8]}... → {needs}")
+        logger.debug(
+            f"needs_processing({Path(file_path).name}, client={client_id}): "
+            f"hash={file_hash[:8]}... → {needs}"
+        )
         return needs
 
     @staticmethod
@@ -297,17 +400,28 @@ class ProfileDatabase:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
-        """Get database status information."""
-        count = self.get_profile_count()
+        """Get database status information including per-client breakdown."""
+        total_count = self.get_profile_count()
         db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
         scanned_count = len(list(self.scanned_files_path.glob("*"))) if self.scanned_files_path.exists() else 0
 
+        # Per-client breakdown
+        cursor = self.conn.execute(
+            "SELECT client_id, job_id, COUNT(*) as cnt "
+            "FROM resume_profiles GROUP BY client_id, job_id ORDER BY client_id, job_id"
+        )
+        client_job_breakdown = [
+            {"client_id": row[0], "job_id": row[1], "count": row[2]}
+            for row in cursor.fetchall()
+        ]
+
         return {
             "db_path": str(self.db_path),
-            "profile_count": count,
+            "profile_count": total_count,
             "db_size_mb": round(db_size / (1024 * 1024), 2),
             "scanned_files_count": scanned_count,
             "scanned_files_path": str(self.scanned_files_path),
+            "client_job_breakdown": client_job_breakdown,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -329,6 +443,8 @@ class ProfileDatabase:
         ]
 
         return ResumeProfile(
+            client_id=row["client_id"],
+            job_id=row["job_id"],
             first_name=row["first_name"] or "",
             middle_name=row["middle_name"],
             last_name=row["last_name"] or "",
