@@ -60,6 +60,68 @@ concurrency: 3
 ### 5. Run
 
 ```bash
+# First time: process resumes into the database (requires --client-id and --job-id)
+python run.py --ingest --client-id ACME_CORP --job-id JOB-001
+
+# Match against a JD (fast, reads from DB, client-scoped)
+python run.py --match --client-id ACME_CORP --job-id JOB-001
+
+# Or combined: ingests new resumes + matches from DB
+python run.py --client-id ACME_CORP --job-id JOB-001
+```
+
+---
+
+## Multi-Tenant Client Isolation (NDA)
+
+The system enforces strict client-level data isolation. This is an NDA requirement — resumes belonging to one client can **never** be accessed, matched, or returned when processing a JD for a different client.
+
+### How It Works
+
+| Rule | Enforcement |
+|------|-------------|
+| Resumes for Client A are invisible to Client B | DB queries filter by `client_id` (SQL WHERE clause + ChromaDB `where` filter) |
+| Within the same client, resumes are shared across jobs | `job_id` is stored for tracking but not used as an isolation boundary |
+| `--client-id` and `--job-id` are mandatory | CLI validation exits with error if missing |
+| Same resume file can exist under different clients | `UNIQUE(client_id, file_hash)` constraint in SQLite |
+
+### Usage
+
+```bash
+# Ingest resumes for Client A
+python run.py --ingest --client-id CLIENT_A --job-id JOB-101
+
+# Match for Client A (only Client A resumes visible)
+python run.py --match --client-id CLIENT_A --job-id JOB-102
+
+# Ingest resumes for Client B (completely separate pool)
+python run.py --ingest --client-id CLIENT_B --job-id JOB-201
+
+# Match for Client B (Client A resumes are NEVER visible here)
+python run.py --match --client-id CLIENT_B --job-id JOB-201
+
+# Check breakdown per client
+python run.py --db-status
+```
+
+### Where Isolation Is Enforced
+
+- **SQLite** (`database.py`): All read methods require `client_id` parameter. Raises `ValueError` if empty.
+- **ChromaDB** (`vector_store.py`): `query_similar()` uses `where={"client_id": ...}` filter. Raises `ValueError` if empty.
+- **Scanner** (`scanner.py`): Deduplication is scoped per client. Same file can be ingested under different clients.
+- **CLI** (`run.py`): `_validate_tenant_flags()` blocks execution if flags are missing.
+
+Edit `config.yaml` to set your preferred model, paths, and scan mode:
+
+```yaml
+model: "anthropic/claude-3-sonnet-20240229"
+scan_mode: "db_first"
+concurrency: 3
+```
+
+### 5. Run
+
+```bash
 # First time: process resumes into the database
 python run.py --ingest
 
