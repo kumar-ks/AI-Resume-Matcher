@@ -47,6 +47,36 @@ from matching_engine.utils import extract_json_from_llm_response
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_string_list(items: list) -> list[str]:
+    """
+    Normalize a list that should contain strings but may contain dicts from LLM.
+
+    Handles cases where LLM returns:
+        - [{"name": "value"}, ...] instead of ["value", ...]
+        - [{"description": "value"}, ...]
+        - Mixed types
+    """
+    if not items:
+        return []
+
+    result = []
+    for item in items:
+        if isinstance(item, str):
+            result.append(item)
+        elif isinstance(item, dict):
+            for key in ("name", "description", "text", "value", "responsibility", "item"):
+                if key in item:
+                    result.append(str(item[key]))
+                    break
+            else:
+                vals = [str(v) for v in item.values() if v]
+                if vals:
+                    result.append("; ".join(vals))
+        else:
+            result.append(str(item))
+    return result
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM PROMPT TEMPLATE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,10 +249,10 @@ class JDUnderstanding:
             good_to_have_skills=good_to_have,
             experience_range_min=data.get("experience_range_min"),
             experience_range_max=data.get("experience_range_max"),
-            education=data.get("education", []),
-            domain_industry=data.get("domain_industry", []),
-            certifications=data.get("certifications", []),
-            responsibilities=data.get("responsibilities", []),
+            education=_normalize_string_list(data.get("education", [])),
+            domain_industry=_normalize_string_list(data.get("domain_industry", [])),
+            certifications=_normalize_string_list(data.get("certifications", [])),
+            responsibilities=_normalize_string_list(data.get("responsibilities", [])),
             location=data.get("location"),
             role_level=role_level,
             raw_text=raw_text,

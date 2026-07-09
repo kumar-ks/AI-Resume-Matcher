@@ -57,28 +57,69 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(debug: bool = False) -> None:
+def setup_logging(debug: bool = False, mode: str = "ingest") -> None:
     """
     Configure logging for the entire application.
+
+    Outputs to:
+        - Console (same as before)
+        - File: logs/ingest.log OR logs/match.log (based on mode)
+
+    File rotation: Daily rollover (midnight), keeping 30 days of history.
+    Format: Full date + timestamp in both console and file.
+    Also captures print() output into the log file.
 
     Called by: main()
 
     Args:
         debug: If True, sets log level to DEBUG for verbose output.
-               If False, sets log level to INFO (default).
-
-    Log Levels:
-        DEBUG  - Detailed internal state (LLM responses, regex matches, scores)
-        INFO   - Pipeline progress (stage transitions, file loading)
-        WARNING - Non-fatal issues (LLM retry, fallback used)
-        ERROR  - Failures that affect output quality
+        mode: "ingest" or "match" — determines which log file to write to.
     """
+    from logging.handlers import TimedRotatingFileHandler
+
     log_level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
+
+    # Ensure logs directory exists
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Choose log file based on mode
+    log_file = log_dir / f"{mode}.log"
+
+    # Full date+time format for both console and file
+    log_format = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
+    # Root logger configuration
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Clear any existing handlers (avoid duplicates on re-init)
+    root_logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    root_logger.addHandler(console_handler)
+
+    # File handler with daily rollover (rotates at midnight, keeps 30 days)
+    file_handler = TimedRotatingFileHandler(
+        filename=str(log_file),
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8",
     )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    file_handler.suffix = "%Y-%m-%d"  # Rolled files: ingest.log.2026-07-06
+    root_logger.addHandler(file_handler)
+
+    # ── Intercept print() → also write to log file ────────────────────────
+    # This ensures all console output (print statements) also appears in the log.
+    sys.stdout = _TeeWriter(sys.stdout, log_file)
+
     # Suppress noisy third-party loggers unless in debug mode
     if not debug:
         logging.getLogger("LiteLLM").setLevel(logging.WARNING)
@@ -87,6 +128,36 @@ def setup_logging(debug: bool = False) -> None:
         logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
         logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
         logging.getLogger("numexpr").setLevel(logging.WARNING)
+        logging.getLogger("chromadb").setLevel(logging.WARNING)
+
+    logger.info(f"Logging initialized: mode={mode}, file={log_file}, level={'DEBUG' if debug else 'INFO'}")
+
+
+class _TeeWriter:
+    """
+    Intercepts sys.stdout to mirror all print() output into a log file.
+    Ensures every console line also appears in the log with a timestamp.
+    """
+
+    def __init__(self, original_stdout, log_file: Path):
+        self.original = original_stdout
+        self.log_file = log_file
+
+    def write(self, text: str):
+        # Write to original stdout (console)
+        self.original.write(text)
+        # Also append to log file (skip empty lines)
+        if text.strip():
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} | PRINT   | stdout | {text.rstrip()}\n")
+
+    def flush(self):
+        self.original.flush()
+
+    def fileno(self):
+        return self.original.fileno()
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -873,7 +944,17 @@ def main():
     else:
         args.failover_model = None
 
-    setup_logging(debug=args.debug)
+    # Determine log mode based on CLI flags
+    if args.match:
+        log_mode = "match"
+    elif args.ingest:
+        log_mode = "ingest"
+    elif getattr(args, "scan_mode", None) in ("folder_only", "db_only"):
+        log_mode = "match"
+    else:
+        log_mode = "ingest"
+
+    setup_logging(debug=args.debug, mode=log_mode)
     logger.info(f"Config loaded from: {config_path}")
     logger.info(f"Primary model: {args.model} | Failover: {args.failover_model or 'none'}")
     logger.debug(f"Effective settings: concurrency={args.concurrency}, explain_top={args.explain_top}")

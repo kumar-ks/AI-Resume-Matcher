@@ -33,6 +33,7 @@ from pathlib import Path
 
 from matching_engine.database import ProfileDatabase
 from matching_engine.file_loader import extract_text, SUPPORTED_EXTENSIONS
+from matching_engine.hallucination_check import check_hallucination
 from matching_engine.resume_understanding import ResumeUnderstanding
 from matching_engine.vector_store import VectorStore
 
@@ -154,6 +155,19 @@ async def scan_and_ingest(
                     f"(no name, no skills, no experience). Storing with raw text only."
                 )
 
+            # Hallucination check: verify extracted fields against source text
+            hallucination_report = check_hallucination(profile, raw_text)
+            if not hallucination_report.is_reliable:
+                logger.warning(
+                    f"  ⚠️  Hallucination detected for {file_path.name} "
+                    f"(confidence={hallucination_report.overall_confidence:.0%})"
+                )
+                for w in hallucination_report.warnings:
+                    logger.warning(f"      {w}")
+                print(f"    ⚠️  Grounding confidence: {hallucination_report.overall_confidence:.0%} — some extracted data may be inaccurate")
+            else:
+                logger.info(f"    ✓ Grounding check passed ({hallucination_report.overall_confidence:.0%})")
+
             # Store in SQLite (with client_id and job_id)
             db.store_profile(
                 profile=profile,
@@ -209,34 +223,168 @@ async def scan_and_ingest(
 
 
 def _build_embedding_text(profile) -> str:
-    """
-    Build a representative text for embedding storage.
-
-    Combines the most semantically meaningful fields:
-    - Career summary (high-level description)
-    - Skills (searchable keywords)
-    - Job titles + companies (role context)
-    - Domain expertise
-    """
+    """Legacy single-field builder. Kept for backward compat."""
     parts = []
-
     if profile.career_summary:
         parts.append(profile.career_summary)
-
     if profile.skills:
         parts.append("Skills: " + ", ".join(profile.skills))
-
     for exp in profile.work_experiences[:5]:
         if exp.title and exp.company:
             parts.append(f"{exp.title} at {exp.company}")
-        if exp.technologies:
-            parts.append("Technologies: " + ", ".join(exp.technologies[:10]))
-
     if profile.domain_expertise:
         parts.append("Domains: " + ", ".join(profile.domain_expertise))
+    return ". ".join(parts)[:2000]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TF-IDF KEYWORD EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Generic filler words that add no signal for matching
+_STOPWORDS = {
+    "responsible", "responsibilities", "team", "player", "excellent",
+    "communication", "skills", "ability", "strong", "good", "great",
+    "experience", "working", "work", "worked", "various", "multiple",
+    "including", "using", "used", "also", "well", "ensure", "ensured",
+    "manage", "managed", "support", "supported", "develop", "developed",
+    "involved", "involvement", "knowledge", "understanding", "help",
+    "helped", "assist", "assisted", "provide", "provided", "maintain",
+    "maintained", "perform", "performed", "create", "created", "implement",
+    "implemented", "based", "related", "required", "different", "several",
+    "within", "across", "along", "part", "role", "position", "company",
+}
+
+
+def _extract_keywords_tfidf(text: str, top_n: int = 80) -> str:
+    """
+    Extract top keywords from text using TF-IDF scoring.
+
+    Uses term frequency with inverse document frequency approximation
+    to keep domain-specific terms and drop generic ones.
+
+    Args:
+        text: Raw text to extract keywords from
+        top_n: Number of top keywords to keep
+
+    Returns:
+        Space-separated string of top keywords
+    """
+    import re
+    from collections import Counter
+    import math
+
+    if not text or not text.strip():
+        return ""
+
+    # Tokenize: split on non-alphanumeric, keep words 3+ chars
+    words = re.findall(r'\b[a-zA-Z][a-zA-Z0-9+#.-]{2,}\b', text.lower())
+
+    # Remove stopwords
+    words = [w for w in words if w not in _STOPWORDS]
+
+    if not words:
+        return ""
+
+    # Term frequency
+    tf = Counter(words)
+    total_terms = len(words)
+
+    # IDF approximation: rarer words in this document get higher weight
+    # (since we don't have a corpus, we use log(total/freq) as a proxy)
+    scored = {}
+    for word, count in tf.items():
+        tf_score = count / total_terms
+        # Penalize very common words (appear > 5% of text)
+        idf_approx = math.log(total_terms / (1 + count))
+        scored[word] = tf_score * idf_approx
+
+    # Sort by score descending, take top N
+    top_keywords = sorted(scored.keys(), key=lambda w: scored[w], reverse=True)[:top_n]
+
+    return " ".join(top_keywords)
+
+
+def _infer_role_level(profile) -> str:
+    """
+    Infer seniority/role level from profile data.
+
+    Uses heuristics based on experience years and job titles.
+
+    Returns:
+        One of: "entry", "mid", "senior", "lead", "principal"
+    """
+    years = profile.total_experience_years or 0
+
+    # Check titles for explicit level indicators
+    titles = " ".join(
+        (exp.title or "").lower() for exp in profile.work_experiences[:3]
+    )
+
+    if any(k in titles for k in ["principal", "distinguished", "fellow", "chief", "cto", "vp"]):
+        return "principal"
+    if any(k in titles for k in ["lead", "head", "director", "architect", "staff"]):
+        return "lead"
+    if any(k in titles for k in ["senior", "sr.", "sr "]):
+        return "senior"
+    if any(k in titles for k in ["junior", "jr.", "jr ", "intern", "trainee", "graduate"]):
+        return "entry"
+
+    # Fallback to years of experience
+    if years >= 12:
+        return "lead"
+    elif years >= 7:
+        return "senior"
+    elif years >= 3:
+        return "mid"
+    else:
+        return "entry"
+
+
+def _build_multi_field_texts(profile) -> tuple[str, str, str]:
+    """
+    Build 3 curated texts for multi-field embeddings using TF-IDF extraction.
+
+    Returns:
+        (skills_text, experience_text, summary_text)
+    """
+    # ── Skills text: technologies, tools, certifications ──────────────────
+    skills_raw_parts = []
+    if profile.skills:
+        skills_raw_parts.append(", ".join(profile.skills))
+    for exp in profile.work_experiences[:5]:
+        if exp.technologies:
+            skills_raw_parts.append(", ".join(exp.technologies))
     if profile.certifications:
-        parts.append("Certifications: " + ", ".join(profile.certifications))
+        skills_raw_parts.append(", ".join(profile.certifications))
+    skills_raw = ". ".join(skills_raw_parts)
+    skills_text = _extract_keywords_tfidf(skills_raw, top_n=60)[:1500]
 
-    text = ". ".join(parts)
-    return text[:2000]
+    # ── Experience text: role titles, companies, domains ───────────────────
+    exp_raw_parts = []
+    for exp in profile.work_experiences[:7]:
+        if exp.title:
+            exp_raw_parts.append(exp.title)
+        if exp.company:
+            exp_raw_parts.append(exp.company)
+        if exp.domain:
+            exp_raw_parts.append(exp.domain)
+        if exp.responsibilities:
+            exp_raw_parts.extend(exp.responsibilities[:3])
+    if profile.domain_expertise:
+        exp_raw_parts.extend(profile.domain_expertise)
+    exp_raw = ". ".join(exp_raw_parts)
+    experience_text = _extract_keywords_tfidf(exp_raw, top_n=60)[:1500]
+
+    # ── Summary text: career summary, achievements ────────────────────────
+    sum_raw_parts = []
+    if profile.career_summary:
+        sum_raw_parts.append(profile.career_summary)
+    if profile.domain_expertise:
+        sum_raw_parts.append(", ".join(profile.domain_expertise))
+    if profile.education:
+        sum_raw_parts.append(", ".join(profile.education[:3]))
+    sum_raw = ". ".join(sum_raw_parts)
+    summary_text = _extract_keywords_tfidf(sum_raw, top_n=50)[:1500]
+
+    return skills_text, experience_text, summary_text
