@@ -577,30 +577,38 @@ AI-Resume-Matcher/
 ```bash
 # ── First time setup ──────────────────────────────────────────────────────────
 
-# Process all resumes into the database (one-time, ~3min for 5 resumes)
-python run.py --ingest
+# Process all resumes into the database (requires --client-id and --job-id)
+python run.py --ingest --client-id ACME_CORP --job-id JOB-001
 
-# Check what's in the database
+# Check what's in the database (shows per-client breakdown)
 python run.py --db-status
 
 # ── Day-to-day usage ─────────────────────────────────────────────────────────
 
-# Match against a new JD (fast, ~20 seconds from DB)
-python run.py --match --jd ./jd/new_role.pdf
+# Match against a new JD (fast, client-scoped, ~20 seconds from DB)
+python run.py --match --client-id ACME_CORP --job-id JOB-002
 
 # Match with only top 5 results shown
-python run.py --match --top 5
+python run.py --match --client-id ACME_CORP --job-id JOB-002 --top 5
 
-# Full pipeline: ingest any new resumes + match from DB (default mode)
-python run.py
+# Full pipeline: ingest new resumes + match from DB (default mode)
+python run.py --client-id ACME_CORP --job-id JOB-001
+
+# ── Multi-tenant usage ───────────────────────────────────────────────────────
+
+# Ingest for a different client (completely isolated pool)
+python run.py --ingest --client-id CLIENT_B --job-id JOB-201
+
+# Match for Client B (ACME_CORP resumes are NEVER visible)
+python run.py --match --client-id CLIENT_B --job-id JOB-201
 
 # ── Advanced usage ───────────────────────────────────────────────────────────
 
-# Bypass DB entirely (original folder-scan behavior)
+# Bypass DB entirely (original folder-scan behavior, no client-id needed)
 python run.py --scan-mode folder_only
 
 # Only use what's in DB, never touch the folder
-python run.py --scan-mode db_only --match
+python run.py --scan-mode db_only --match --client-id ACME_CORP --job-id JOB-001
 
 # Generate formatted DOCX for top 3 + export JSON
 python run.py --match --generate-doc 3 --output results.json

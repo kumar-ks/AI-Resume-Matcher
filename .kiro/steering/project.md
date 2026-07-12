@@ -2,13 +2,11 @@
 
 ## Overview
 
-This is a Python-based AI-powered resume-to-JD matching engine with a 6-stage pipeline. It supports persistent database storage (SQLite + ChromaDB) so resumes are extracted once and matched instantly against new job descriptions.
-
-**Multi-tenant isolation (NDA enforcement):** Every resume and JD is scoped to a `client_id`. Resumes belonging to one client can NEVER be accessed by another client. Within the same client, resumes are freely shared across `job_id`s.
+Python-based AI-powered resume-to-JD matching engine with a 6-stage pipeline. Supports persistent database storage (SQLite + ChromaDB) with multi-tenant client isolation (NDA enforcement), multi-field embeddings, hybrid search (BM25 + vector), hallucination detection, and scoring evaluation.
 
 ## Architecture
 
-Two-phase architecture: **Ingest** (one-time, expensive LLM extraction) and **Match** (repeatable, fast scoring from DB).
+Two-phase architecture: **Ingest** (one-time LLM extraction) and **Match** (fast scoring from DB).
 
 ### Pipeline Stages
 
@@ -26,11 +24,12 @@ Two-phase architecture: **Ingest** (one-time, expensive LLM extraction) and **Ma
 - `run.py` — CLI entry point, orchestrates the full flow
 - `matching_engine/pipeline.py` — Pipeline orchestrator (async, concurrent stages)
 - `matching_engine/models.py` — Pydantic data models (all structured data)
-- `matching_engine/config.py` — AppConfig (Pydantic-based, YAML + CLI merge)
 - `matching_engine/llm_client.py` — LiteLLM wrapper with failover + token estimation
-- `matching_engine/database.py` — SQLite profile storage & retrieval (client-scoped)
-- `matching_engine/vector_store.py` — ChromaDB embedding storage & similarity search (client-scoped)
-- `matching_engine/scanner.py` — File scanner with hash-based deduplication (client-scoped)
+- `matching_engine/database.py` — SQLite profile storage (client-scoped)
+- `matching_engine/vector_store.py` — ChromaDB multi-field embeddings + hybrid search
+- `matching_engine/scanner.py` — File scanner with TF-IDF keyword extraction + hallucination checks
+- `matching_engine/hallucination_check.py` — Grounding verification (LLM output vs source text)
+- `matching_engine/evaluation.py` — Scoring validation + bias detection
 - `matching_engine/file_loader.py` — Text extraction (PDF/DOCX/TXT, OCR, text boxes)
 
 ## Technology Stack
@@ -38,39 +37,70 @@ Two-phase architecture: **Ingest** (one-time, expensive LLM extraction) and **Ma
 - **Language:** Python 3.10+
 - **Data models:** Pydantic v2
 - **LLM interface:** LiteLLM (supports Ollama, OpenAI, Anthropic, AWS Bedrock)
-- **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2` default)
-- **Vector store:** ChromaDB (with client_id metadata filtering)
-- **Database:** SQLite (profiles with client_id/job_id columns)
+- **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`)
+- **Vector store:** ChromaDB (3 collections: skills, experience, summary)
+- **Search:** Hybrid — BM25 lexical + vector semantic with Reciprocal Rank Fusion
+- **Database:** SQLite (profiles with client_id/job_id)
 - **Graph:** NetworkX (knowledge graph)
 - **File parsing:** PyPDF2, pdfplumber, python-docx
 - **Config:** YAML (PyYAML)
 - **Async:** asyncio for concurrent processing
+- **Logging:** TimedRotatingFileHandler (daily rollover, 30-day retention)
 
 ## Multi-Tenant Isolation (NDA Enforcement)
 
 ### Rules
 
-1. Every resume profile is tagged with `client_id` and `job_id` at ingest time
-2. `--client-id` and `--job-id` CLI flags are REQUIRED for `--ingest` and `--match` modes
-3. DB queries ALWAYS filter by `client_id` — resumes from one client are NEVER visible to another
-4. Within the same `client_id`, resumes are freely shared across `job_id`s
-5. ChromaDB queries use `where={"client_id": ...}` filter for vector similarity search
-6. SQLite uses `UNIQUE(client_id, file_hash)` constraint — same file can exist under different clients
-7. Violating client isolation is treated as an NDA breach — never bypass these checks
+1. Every profile is tagged with `client_id` and `job_id` at ingest time
+2. `--client-id` and `--job-id` CLI flags are REQUIRED for `--ingest` and `--match`
+3. DB queries ALWAYS filter by `client_id`
+4. ChromaDB queries use `where={"client_id": ...}` filter
+5. SQLite uses `UNIQUE(client_id, file_hash)` constraint
+6. Within same client, resumes are shared across job_ids freely
 
-### Data Flow
+## Embedding Strategy (Multi-Field)
 
-```
---client-id ACME --job-id JOB-001
-        │
-        ├─→ scanner.py: filters ingested hashes by client_id
-        ├─→ database.py: stores profile with client_id + job_id columns
-        ├─→ vector_store.py: stores embedding with client_id in metadata
-        │
-        └─→ At match time:
-            ├─→ database.py: SELECT ... WHERE client_id = ?
-            └─→ vector_store.py: query(..., where={"client_id": "ACME"})
-```
+Three separate ChromaDB collections per resume:
+- `resume_skills` — Technologies, tools, certifications (weight: 0.45)
+- `resume_experience` — Role titles, companies, domains (weight: 0.35)
+- `resume_summary` — Career summary, achievements (weight: 0.20)
+
+Before embedding, TF-IDF keyword extraction removes generic filler words and keeps domain-specific terms.
+
+## Hybrid Search
+
+At query time:
+1. JD text is embedded and queried against all 3 collections (vector search)
+2. BM25 lexical scoring runs against stored documents (exact keyword matching)
+3. Results are fused: 65% vector RRF + 35% BM25
+4. Top-N candidates returned for full scoring
+
+## Hallucination Detection
+
+After LLM extraction, `check_hallucination()` verifies:
+- Skills: split compound strings, check sub-terms individually (>50% threshold)
+- Companies: lenient matching with suffix stripping (Inc, Ltd, etc.)
+- Certifications: fuzzy match with aliases (k8s↔kubernetes, AWS↔Amazon Web Services)
+- Experience years: cross-check claimed years vs work history date span
+- Name: verify name parts appear in source text
+
+Reports confidence score (0-1). Flags unreliable extractions but does not block storage.
+
+## Evaluation Framework
+
+After matching, `generate_evaluation_report()` checks:
+- **Ranking stability:** Perturb weights ±10%, check if top-3 changes
+- **Score distribution:** Detect all-same, too-narrow, ceiling/floor effects
+- **Calibration bands:** Strong/Good/Partial/Weak fit distribution
+- **Bias detection:** Experience over-weighting, skill-count correlation
+- **Keyword stuffing:** High must_have match but low skills_depth = suspect
+
+## Logging
+
+- Two log files: `logs/ingest.log` and `logs/match.log`
+- Daily rollover at midnight, 30-day retention
+- All console output (logger + print) captured in log files
+- Format: `2026-07-09 14:32:07 | INFO | module_name | message`
 
 ## Coding Standards
 
@@ -79,25 +109,16 @@ Two-phase architecture: **Ingest** (one-time, expensive LLM extraction) and **Ma
 - Use **type hints** on all function signatures
 - Use **Pydantic BaseModel** for all structured data (not raw dicts)
 - Use **async/await** for I/O-bound operations (LLM calls, file I/O)
-- All modules have a docstring at the top explaining purpose, usage, and call relationships
-- Functions have docstrings with `Called by:` and `Calls:` annotations where relevant
-- Use `logging` module (not print) for internal state; `print()` only for user-facing CLI output
+- All modules have docstrings explaining purpose and call relationships
+- Use `logging` module for internal state; `print()` for user-facing CLI output
 - Configuration priority: CLI flags > config.yaml > built-in defaults
 
 ### Error Handling
 
 - LLM calls: retry 3x with exponential backoff, then failover to backup model
 - File extraction: fallback from PDF to pdfplumber to OCR; regex baseline for contact info
-- JSON parsing from LLM: strip markdown fences, attempt repair, log warnings on fallback
+- JSON parsing from LLM: strip markdown fences, normalize dicts-to-strings, attempt repair
 - Never crash the pipeline on a single resume failure; log and continue
-
-### Naming Conventions
-
-- Modules: `snake_case.py`
-- Classes: `PascalCase` (Pydantic models, pipeline stages)
-- Functions: `snake_case`
-- Constants: `UPPER_SNAKE_CASE`
-- Private helpers: prefix with `_`
 
 ### Data Flow
 
@@ -115,16 +136,35 @@ All inter-stage communication uses models from `matching_engine/models.py`:
 AI-Resume-Matcher/
 ├── run.py                    ← CLI entry point
 ├── config.yaml               ← Runtime configuration
-├── requirements.txt          ← Pinned dependencies
-├── resumes/                  ← Input resumes (PDF/DOCX/TXT) — git-ignored
+├── requirements.txt          ← Dependencies
+├── resumes/                  ← Input resumes — git-ignored
 ├── jd/                       ← Input JD files — git-ignored
 ├── template/                 ← DOCX template (read-only)
 ├── rendered/                 ← Generated output docs — git-ignored
+├── logs/
+│   ├── ingest.log            ← Ingest logs (daily rollover)
+│   └── match.log             ← Match logs (daily rollover)
 ├── data/
 │   ├── profiles.db           ← SQLite (client-scoped profiles)
-│   ├── chroma/               ← ChromaDB (client-scoped embeddings)
+│   ├── chroma/               ← ChromaDB (multi-field embeddings)
 │   └── scanned_files/        ← Copies of processed resumes
-└── matching_engine/          ← Core library (all pipeline stages)
+└── matching_engine/
+    ├── models.py             ← Pydantic data models
+    ├── database.py           ← SQLite with client isolation
+    ├── vector_store.py       ← Multi-field ChromaDB + hybrid search
+    ├── scanner.py            ← Ingest with TF-IDF + hallucination check
+    ├── hallucination_check.py← Grounding verification
+    ├── evaluation.py         ← Scoring validation + bias detection
+    ├── jd_understanding.py   ← Stage 1
+    ├── resume_understanding.py← Stage 2
+    ├── semantic_matching.py  ← Stage 3
+    ├── scoring.py            ← Stage 4
+    ├── explainability.py     ← Stage 5
+    ├── template_renderer.py  ← Stage 6
+    ├── pipeline.py           ← Pipeline orchestrator
+    ├── llm_client.py         ← LiteLLM wrapper
+    ├── file_loader.py        ← PDF/DOCX/TXT extraction
+    └── utils.py              ← Shared utilities
 ```
 
 ## Build & Run
@@ -133,56 +173,38 @@ AI-Resume-Matcher/
 # Install dependencies
 pip install -r requirements.txt
 
-# Ingest resumes for a client (REQUIRED: --client-id and --job-id)
+# Ingest resumes for a client
 python run.py --ingest --client-id ACME_CORP --job-id JOB-001
 
-# Match against a JD (only ACME_CORP resumes visible)
+# Match against a JD (only that client's resumes visible)
 python run.py --match --client-id ACME_CORP --job-id JOB-001
 
 # Combined ingest + match
 python run.py --client-id ACME_CORP --job-id JOB-001
 
-# Check DB status (shows per-client breakdown)
+# Check DB status (per-client breakdown)
 python run.py --db-status
 
-# Bypass DB entirely (original stateless mode, no client-id needed)
+# Bypass DB entirely (stateless mode)
 python run.py --scan-mode folder_only
 ```
 
 ## Important Constraints
 
-- **PII sensitivity:** Resume files contain personal data. Never commit resumes, JDs, or the `data/` folder to git.
-- **API keys:** Stored in `.env` (git-ignored). Reference by key name, never expose values.
-- **Scoring weights** must always sum to 1.0 — the config validator enforces this.
-- **Ollama auto-management:** The script auto-starts Ollama and auto-pulls models. Don't assume Ollama is running.
-- **SSL/proxy handling:** The codebase patches SSL verification for corporate environments (Zscaler). Don't remove those workarounds.
-- **No test framework** is currently set up. If adding tests, use `pytest` with `pytest-asyncio`.
-- **Multi-tenant isolation (NDA):**
-  - `--client-id` and `--job-id` are mandatory for all DB modes
-  - Resumes from one client are NEVER returned for another client
-  - Violation = NDA breach — never bypass client_id checks in DB or vector store queries
-
-## Databases
-
-### SQLite (`data/profiles.db`)
-
-Stores structured resume profiles. Key columns: `client_id`, `job_id`, `file_hash`, `source_file`, profile fields as JSON.
-
-```bash
-sqlite3 data/profiles.db
-.schema resume_profiles
-SELECT client_id, job_id, source_file, first_name, last_name FROM resume_profiles;
-```
-
-### ChromaDB (`data/chroma/`)
-
-File-based vector store for resume embeddings. Each embedding has `client_id` and `job_id` in metadata. Queried via Python API with `where={"client_id": ...}` filter.
+- **PII sensitivity:** Never commit resumes, JDs, or `data/` to git
+- **API keys:** Stored in `.env` (git-ignored). Reference by key name, never expose values
+- **Scoring weights** must sum to 1.0
+- **Ollama auto-management:** Script auto-starts Ollama and auto-pulls models
+- **SSL/proxy handling:** Patches SSL verification for corporate environments (Zscaler)
+- **Multi-tenant isolation:** `--client-id` mandatory for all DB modes. Never bypass.
+- **Logging:** All output goes to `logs/` with daily rollover
 
 ## LLM Prompt Patterns
 
-When modifying LLM prompts in `jd_understanding.py` or `resume_understanding.py`:
+When modifying LLM prompts:
 - Always request JSON output with a strict schema
 - Include "respond ONLY with valid JSON" instruction
 - Strip markdown code fences from responses before parsing
+- Use `_normalize_string_list()` to handle LLM returning dicts instead of strings
 - Provide fallback/default values if JSON parsing fails
 - Keep temperature low (0.1) for structured extraction
