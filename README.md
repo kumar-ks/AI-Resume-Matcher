@@ -1,514 +1,363 @@
 # AI Resume Matcher
 
-AI-powered Resume to Job Description matching engine with a 6-stage pipeline. Now supports **persistent database storage** — resumes are extracted once and stored, then matched instantly against new JDs.
+AI-powered Resume to Job Description matching engine with a 6-stage pipeline. Production-grade system with **PostgreSQL + pgvector**, **multi-tenant client isolation (NDA)**, **hybrid search**, **hallucination detection**, and a **FastAPI REST API** for UI server integration.
 
 ---
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Two Operating Modes](#two-operating-modes)
-- [CLI Options](#cli-options)
-- [Configuration (`config.yaml`)](#configuration-configyaml)
-- [Scan Modes](#scan-modes)
 - [Architecture](#architecture)
-- [Speed Comparison](#speed-comparison)
-- [Model Failover](#model-failover)
-- [Scoring Weights — Design Rationale](#scoring-weights--design-rationale)
-- [Template-Based Resume Generation (`--generate-doc`)](#template-based-resume-generation---generate-doc)
-- [API Keys (`.env` file)](#api-keys-env-file)
+- [API Server](#api-server)
+- [Multi-Tenant Client Isolation (NDA)](#multi-tenant-client-isolation-nda)
+- [Database (PostgreSQL + pgvector)](#database-postgresql--pgvector)
+- [Hybrid Search](#hybrid-search)
+- [Hallucination Detection](#hallucination-detection)
+- [Scoring & Evaluation](#scoring--evaluation)
+- [CLI Options](#cli-options)
+- [Configuration](#configuration)
+- [Logging](#logging)
 - [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
-- [Example Usage](#example-usage)
-- [Example Output](#example-output)
+- [License](#license)
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Start PostgreSQL + pgvector
 
 ```bash
-cd AI-Resume-Matcher
+docker-compose up -d
+```
+
+This starts a single container with PostgreSQL 16 + pgvector extension.
+
+### 2. Install dependencies
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Install Ollama (for local LLM)
+### 3. Install Ollama (for local LLM)
 
 ```bash
 brew install ollama
 ollama pull llama3
 ```
 
-> The script auto-starts Ollama if not running. It also auto-pulls the model if not downloaded yet.
+> The script auto-starts Ollama if not running and auto-pulls the model.
 
-### 3. Place your files
+### 4. Place your files
 
 - Drop resumes into the `resumes/` folder (PDF, DOCX, TXT)
 - Place the job description into the `jd/` folder (PDF, DOCX, TXT)
 
-### 4. Configure
-
-Edit `config.yaml` to set your preferred model, paths, and scan mode:
-
-```yaml
-model: "anthropic/claude-3-sonnet-20240229"
-scan_mode: "db_first"
-concurrency: 3
-```
-
-### 5. Run
+### 5. Run (CLI)
 
 ```bash
-# First time: process resumes into the database (requires --client-id and --job-id)
+# Ingest resumes into PostgreSQL (requires --client-id and --job-id)
 python run.py --ingest --client-id ACME_CORP --job-id JOB-001
 
-# Match against a JD (fast, reads from DB, client-scoped)
+# Match against a JD (only ACME_CORP resumes visible)
 python run.py --match --client-id ACME_CORP --job-id JOB-001
 
-# Or combined: ingests new resumes + matches from DB
-python run.py --client-id ACME_CORP --job-id JOB-001
-```
-
----
-
-## Multi-Tenant Client Isolation (NDA)
-
-The system enforces strict client-level data isolation. This is an NDA requirement — resumes belonging to one client can **never** be accessed, matched, or returned when processing a JD for a different client.
-
-### How It Works
-
-| Rule | Enforcement |
-|------|-------------|
-| Resumes for Client A are invisible to Client B | DB queries filter by `client_id` (SQL WHERE clause + ChromaDB `where` filter) |
-| Within the same client, resumes are shared across jobs | `job_id` is stored for tracking but not used as an isolation boundary |
-| `--client-id` and `--job-id` are mandatory | CLI validation exits with error if missing |
-| Same resume file can exist under different clients | `UNIQUE(client_id, file_hash)` constraint in SQLite |
-
-### Usage
-
-```bash
-# Ingest resumes for Client A
-python run.py --ingest --client-id CLIENT_A --job-id JOB-101
-
-# Match for Client A (only Client A resumes visible)
-python run.py --match --client-id CLIENT_A --job-id JOB-102
-
-# Ingest resumes for Client B (completely separate pool)
-python run.py --ingest --client-id CLIENT_B --job-id JOB-201
-
-# Match for Client B (Client A resumes are NEVER visible here)
-python run.py --match --client-id CLIENT_B --job-id JOB-201
-
-# Check breakdown per client
+# Check DB status
 python run.py --db-status
 ```
 
-### Where Isolation Is Enforced
-
-- **SQLite** (`database.py`): All read methods require `client_id` parameter. Raises `ValueError` if empty.
-- **ChromaDB** (`vector_store.py`): `query_similar()` uses `where={"client_id": ...}` filter. Raises `ValueError` if empty.
-- **Scanner** (`scanner.py`): Deduplication is scoped per client. Same file can be ingested under different clients.
-- **CLI** (`run.py`): `_validate_tenant_flags()` blocks execution if flags are missing.
-
-Edit `config.yaml` to set your preferred model, paths, and scan mode:
-
-```yaml
-model: "anthropic/claude-3-sonnet-20240229"
-scan_mode: "db_first"
-concurrency: 3
-```
-
-### 5. Run
+### 6. Run (API server)
 
 ```bash
-# First time: process resumes into the database
-python run.py --ingest
+# Set API key
+export AI_MATCHER_API_KEYS="your-secure-key"
 
-# Match against a JD (fast, reads from DB)
-python run.py --match
+# Start server
+uvicorn api.server:app --host 0.0.0.0 --port 8000
 
-# Or combined: ingests new resumes + matches from DB (default)
-python run.py
-```
-
----
-
-## Two Operating Modes
-
-### Ingest Mode (`--ingest`)
-
-Processes resumes and stores them persistently. Run once (or whenever new resumes are added).
-
-| Step | What happens |
-|------|--------------|
-| 1 | Scans `resumes/` folder for files |
-| 2 | Checks file hash against DB (skips already-processed files) |
-| 3 | Extracts profile via LLM (Stage 2) |
-| 4 | Stores structured profile in SQLite |
-| 5 | Stores embeddings in ChromaDB |
-| 6 | Copies original file to `data/scanned_files/` |
-
-Ingest is async and non-blocking — processes multiple resumes in parallel (controlled by `--concurrency`).
-
-### Match Mode (`--match`)
-
-Matches stored profiles against a JD. No re-extraction needed — this is where the speed comes from.
-
-| Step | What happens |
-|------|--------------|
-| 1 | Loads JD, extracts requirements via LLM (one call) |
-| 2 | Queries ChromaDB for top similar profiles (semantic pre-filter) |
-| 3 | Loads full profiles from SQLite |
-| 4 | Runs scoring (Stage 3-4, no LLM needed) |
-| 5 | Explains top N candidates (Stage 5, optional LLM) |
-
-**~20 seconds for 100 profiles** when matching from DB.
-
----
-
-## CLI Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config` | `./config.yaml` | Path to config file |
-| `--resumes` | `./resumes` | Folder with resume files |
-| `--jd` | (auto from `./jd/`) | Specific JD file path |
-| `--jd-dir` | `./jd` | Folder with JD files |
-| `--model` | from config | LLM model (e.g., `ollama/llama3`, `gpt-4`) |
-| `--embedding-model` | `all-MiniLM-L6-v2` | Embedding model for semantic matching |
-| `--top` | all | Show only top N candidates |
-| `--output` | none | Save JSON results to file |
-| `--debug` | off | Verbose logging |
-| `--concurrency` | 3 | Parallel processing count |
-| `--explain-top` | all | Only explain top N candidates |
-| `--generate-doc` | none | Generate DOCX for top N candidates |
-| `--ingest` | off | Ingest resumes into DB |
-| `--match` | off | Match from DB against JD |
-| `--scan-mode` | `db_first` | `db_first` / `folder_only` / `db_only` |
-| `--db-status` | off | Show DB stats and exit |
-
-**Priority order:** `CLI flags` > `config.yaml` > `built-in defaults`
-
----
-
-## Configuration (`config.yaml`)
-
-```yaml
-# ─────────────────────────────────────────────────────────────────────────────
-# AI Resume Matcher — Configuration File
-# ─────────────────────────────────────────────────────────────────────────────
-# All settings can be overridden via CLI flags (CLI takes priority over config).
-# Priority: CLI flags > config.yaml > built-in defaults
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ── LLM Model Configuration ──────────────────────────────────────────────────
-# Primary model: Used first for all LLM calls.
-# Failover model: Automatically used if primary fails (API error, rate limit, timeout).
-#
-# Supported providers via LiteLLM:
-#   Local:    ollama/llama3, ollama/mistral, ollama/qwen2, ollama/llama3:70b
-#   OpenAI:   gpt-4, gpt-4o, gpt-3.5-turbo
-#   Anthropic: anthropic/claude-3-sonnet-20240229, anthropic/claude-3-opus-20240229
-#   AWS:      bedrock/anthropic.claude-3-sonnet
-model: "anthropic/claude-3-sonnet-20240229"
-failover_model: "ollama/llama3"
-
-# ── Embedding Model ──────────────────────────────────────────────────────────
-# Sentence-transformers model for semantic matching (Stage 3).
-#   Fast:     all-MiniLM-L6-v2 (80MB, good balance)
-#   Accurate: all-mpnet-base-v2 (420MB, better quality)
-embedding_model: "all-MiniLM-L6-v2"
-
-# ── File Paths ────────────────────────────────────────────────────────────────
-resumes_dir: "./resumes"
-jd_dir: "./jd"
-
-# ── Performance ──────────────────────────────────────────────────────────────
-# concurrency: Resumes processed in parallel
-#   Ollama (local): 2-3 (limited by GPU/CPU)
-#   Cloud APIs:     5-10 (rate limit dependent)
-concurrency: 3
-
-# explain_top: Only generate AI explanations for top N candidates
-#   null = explain all | 10 = recommended for 50+ resumes
-explain_top: null
-
-# ── LLM Parameters ───────────────────────────────────────────────────────────
-temperature: 0.1
-max_tokens: 4096
-
-# ── Scoring Weights ──────────────────────────────────────────────────────────
-# Must sum to 1.0. Adjust based on hiring criteria.
-# See Scoring Weights section below for detailed reasoning.
-scoring_weights:
-  must_have_match: 0.35       # "Can they do the job?" (hard filter)
-  experience_match: 0.25      # "Are they at the right level?"
-  skills_depth: 0.20          # "How deep is their expertise?"
-  project_relevance: 0.12     # "Have they applied it practically?"
-  recency_factor: 0.08        # "Is their experience current?"
-
-# ── Output ────────────────────────────────────────────────────────────────────
-output_file: null       # Set to "results.json" to always export
-top_n: null             # Show only top N (null = show all)
-debug: false            # Enable verbose logging
-
-# ── Database & Scanner ────────────────────────────────────────────────────────
-# Storage paths for the persistent resume database
-db_path: "./data/profiles.db"              # SQLite profile storage
-vector_store_path: "./data/chroma"         # ChromaDB embedding storage
-scanned_files_path: "./data/scanned_files" # Copies of processed resumes
-
-# scan_mode controls how matching finds candidates:
-#   "db_first"    — Ingests new files + matches from DB (DEFAULT)
-#   "folder_only" — Bypass DB, scan folder directly (original behavior)
-#   "db_only"     — Only use DB, never scan folder (fastest)
-scan_mode: "db_first"
-```
-
----
-
-## Scan Modes
-
-| Mode | Behavior | Use case |
-|------|----------|----------|
-| `db_first` (default) | Ingests new files into DB, then matches from DB | Normal operation |
-| `folder_only` | Bypasses DB entirely, processes fresh every time (original behavior) | Testing, debugging, bypass |
-| `db_only` | Only uses what's already in the DB (fastest, no folder scan) | Repeated queries against same pool |
-
-Set via config or CLI:
-
-```bash
-python run.py --scan-mode db_only --match
+# Swagger docs at http://localhost:8000/docs
 ```
 
 ---
 
 ## Architecture
 
-### Two-Phase Architecture
-
-The system separates resume processing (expensive, one-time) from matching (cheap, repeatable):
-
 ```
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                        PHASE 1: INGEST (one-time)                          ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                            ║
-║  resumes/           File Loader         LLM Extraction       Storage       ║
-║  ┌──────────┐      ┌───────────┐      ┌──────────────┐    ┌──────────┐   ║
-║  │ PDF/DOCX │─────▶│ extract   │─────▶│ Stage 2:     │───▶│ SQLite   │   ║
-║  │ TXT/IMG  │      │ text      │      │ Profile JSON │    │ ChromaDB │   ║
-║  └──────────┘      └───────────┘      └──────────────┘    └──────────┘   ║
-║                                                                            ║
-║  • Checks file hash (skips duplicates)                                     ║
-║  • Parallel processing (--concurrency)                                     ║
-║  • Copies originals to data/scanned_files/                                 ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                     PHASE 2: MATCH (repeatable, fast)                       ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                            ║
-║  jd/              LLM Extraction     ChromaDB Query      Scoring           ║
-║  ┌──────────┐    ┌──────────────┐   ┌─────────────┐   ┌──────────────┐   ║
-║  │ JD File  │───▶│ Stage 1:     │──▶│ Semantic    │──▶│ Stage 3-4:   │   ║
-║  │          │    │ Requirements │   │ Pre-filter  │   │ Score + Rank │   ║
-║  └──────────┘    └──────────────┘   └──────┬──────┘   └──────┬───────┘   ║
-║                                             │                  │           ║
-║                                      ┌──────▼──────┐   ┌──────▼───────┐   ║
-║                                      │ SQLite:     │   │ Stage 5:     │   ║
-║                                      │ Full Profile│   │ Explanations │   ║
-║                                      └─────────────┘   └──────────────┘   ║
-║                                                                            ║
-║  • Single LLM call for JD                                                  ║
-║  • No LLM needed for scoring (Stage 3-4)                                   ║
-║  • Optional LLM for explanations (Stage 5, top N only)                     ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+┌─────────────────────────┐         REST API          ┌─────────────────────────────┐
+│      UI SERVER          │ ──────────────────────────▶│        AI SERVER            │
+│                         │                            │                             │
+│  - Portal/Dashboard     │  POST /api/ingest          │  - Ollama LLM               │
+│  - 5M resumes in its DB │  POST /api/match           │  - PostgreSQL + pgvector    │
+│  - User uploads JDs     │  GET  /api/status          │  - FastAPI server           │
+│  - Shows results        │◀──────────────────────────│  - Matching pipeline        │
+│                         │         JSON responses     │                             │
+└─────────────────────────┘                            └─────────────────────────────┘
 ```
 
 ### Pipeline Stages
 
-| Stage | Name | LLM Required | Description |
-|-------|------|:------------:|-------------|
-| 1 | JD Understanding | Yes (1 call) | Extracts structured requirements from JD |
-| 2 | Resume Understanding | Yes (per resume) | Extracts structured profile (ingest only) |
-| 3 | Semantic Matching | No | Embedding similarity across 6 dimensions |
-| 4 | Scoring | No | Weighted formula → qualification percentage |
-| 5 | Explainability | Optional | LLM reasoning for top N, rule-based for rest |
-| 6 | Template Rendering | No | DOCX generation (if `--generate-doc`) |
+| Stage | Module | LLM? | Description |
+|-------|--------|:----:|-------------|
+| 1 | `jd_understanding.py` | Yes (1 call) | Extracts structured requirements from JD |
+| 2 | `resume_understanding.py` | Yes (per resume) | Extracts structured profile (ingest only) |
+| 3 | `semantic_matching.py` | No | Embedding similarity across 6 dimensions |
+| 4 | `scoring.py` | No | Weighted formula → qualification percentage |
+| 5 | `explainability.py` | Optional | LLM reasoning for top N candidates |
+| 6 | `template_renderer.py` | No | DOCX generation (if `--generate-doc`) |
 
 ---
 
-## Speed Comparison
+## API Server
 
-| Scenario | Folder-only mode | DB mode |
-|----------|-----------------|---------|
-| 5 resumes, first run | ~3 min | ~3 min (ingest) |
-| 5 resumes, new JD | ~3 min | ~20 sec |
-| 100 resumes, first run | ~40 min | ~40 min (ingest) |
-| 100 resumes, new JD | ~40 min | ~30 sec |
+### Authentication
 
-The entire point of DB mode: **pay the extraction cost once**, then match against unlimited JDs in seconds.
+All endpoints (except `/health`) require an `X-API-Key` header.
+
+```bash
+# Generate a secure key
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Set it (comma-separated for multiple keys)
+export AI_MATCHER_API_KEYS="key1,key2"
+```
+
+Default dev key: `dev-key-change-me` (used if no env var set).
+
+### Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/api/ingest` | Upload batch of resumes for async processing |
+| `GET` | `/api/ingest/{task_id}` | Poll ingest task status |
+| `POST` | `/api/match` | Match JD against stored profiles (returns ranked JSON) |
+| `GET` | `/api/status` | DB stats for a client |
+| `GET` | `/health` | Health check (no auth) |
+
+### Example API Calls
+
+```bash
+# Ingest resumes
+curl -X POST http://localhost:8000/api/ingest \
+  -H "X-API-Key: your-key" \
+  -F "client_id=ACME_CORP" \
+  -F "job_id=JOB-001" \
+  -F "files=@resume1.pdf" \
+  -F "files=@resume2.docx"
+
+# Response: {"task_id": "abc-123", "poll_url": "/api/ingest/abc-123"}
+
+# Poll status
+curl http://localhost:8000/api/ingest/abc-123 -H "X-API-Key: your-key"
+
+# Match a JD
+curl -X POST http://localhost:8000/api/match \
+  -H "X-API-Key: your-key" \
+  -F "client_id=ACME_CORP" \
+  -F "job_id=JOB-001" \
+  -F "jd_file=@job_description.pdf"
+
+# DB status
+curl "http://localhost:8000/api/status?client_id=ACME_CORP" -H "X-API-Key: your-key"
+```
 
 ---
 
-## Model Failover
+## Multi-Tenant Client Isolation (NDA)
 
-The framework supports automatic failover between models:
+Strict client-level data isolation. Resumes for one client can **never** be accessed by another.
 
+| Rule | How |
+|------|-----|
+| Resumes for Client A invisible to Client B | All SQL queries filter by `client_id` |
+| `--client-id` and `--job-id` mandatory | CLI validation exits if missing |
+| Same file can exist under different clients | `UNIQUE(client_id, file_hash)` constraint |
+| Within same client, resumes shared across jobs | `job_id` for tracking, not isolation |
+
+```bash
+# Client A
+python run.py --ingest --client-id CLIENT_A --job-id JOB-101
+python run.py --match --client-id CLIENT_A --job-id JOB-102
+
+# Client B (completely separate, no cross-visibility)
+python run.py --ingest --client-id CLIENT_B --job-id JOB-201
+python run.py --match --client-id CLIENT_B --job-id JOB-201
 ```
-Primary Model (config)  ───FAIL───▶  Failover Model (config)
-       │                                      │
-       │ SUCCESS                              │ SUCCESS
-       ▼                                      ▼
-  Pipeline proceeds                    Pipeline proceeds
+
+---
+
+## Database (PostgreSQL + pgvector)
+
+Single Docker container (`pgvector/pgvector:pg16`) provides both structured storage and vector search.
+
+```bash
+# Start
+docker-compose up -d
+
+# Connect
+docker exec -it resume_matcher_db psql -U matcher -d resume_matcher
 ```
 
-### Configuration
+### Tables
+
+| Table | Purpose |
+|-------|---------|
+| `resume_profiles` | Structured candidate data (JSONB for skills, work history) |
+| `resume_embeddings` | Multi-field vector embeddings (3 rows per resume) |
+
+### Verify Data
+
+```sql
+-- Profile count per client
+SELECT client_id, job_id, COUNT(*) FROM resume_profiles GROUP BY client_id, job_id;
+
+-- Embeddings per field type
+SELECT field_type, COUNT(*) FROM resume_embeddings GROUP BY field_type;
+
+-- Test vector similarity
+SELECT file_hash, metadata->>'full_name',
+       1-(embedding <=> (SELECT embedding FROM resume_embeddings WHERE field_type='skills' LIMIT 1)) as similarity
+FROM resume_embeddings WHERE field_type='skills'
+ORDER BY similarity DESC LIMIT 5;
+
+-- Full-text search
+SELECT file_hash, metadata->>'full_name',
+       ts_rank(to_tsvector('english', content), plainto_tsquery('english', 'kubernetes docker')) as rank
+FROM resume_embeddings
+WHERE to_tsvector('english', content) @@ plainto_tsquery('english', 'kubernetes docker')
+ORDER BY rank DESC;
+```
+
+---
+
+## Hybrid Search
+
+Combines two search methods for better retrieval:
+
+| Method | Weight | How |
+|--------|--------|-----|
+| Vector search (semantic) | 65% | pgvector HNSW cosine similarity across 3 field types, fused with RRF |
+| Full-text search (lexical) | 35% | PostgreSQL `ts_rank` + `tsvector` (exact keyword matching) |
+
+Multi-field embeddings per resume:
+- `skills` (weight 0.45) — Technologies, tools, certifications
+- `experience` (weight 0.35) — Role titles, companies, domains
+- `summary` (weight 0.20) — Career summary, achievements
+
+TF-IDF keyword extraction removes generic filler words before embedding.
+
+---
+
+## Hallucination Detection
+
+During ingest, each LLM extraction is verified against the source resume text:
+
+- **Skills:** Compound strings split on delimiters; >50% of sub-terms must be found
+- **Companies:** Lenient matching with suffix stripping (Inc, Ltd, Corp)
+- **Certifications:** Fuzzy match with tech aliases (k8s ↔ Kubernetes)
+- **Experience years:** Cross-checks claimed total vs work history date span
+- **Name:** Verifies extracted name parts appear in source text
+
+Reports confidence score (0–100%). Flags unreliable extractions with warnings.
+
+---
+
+## Scoring & Evaluation
+
+### Scoring Weights
+
+| Dimension | Weight | Question |
+|-----------|--------|----------|
+| `must_have_match` | 0.35 | Does the candidate have required skills? |
+| `experience_match` | 0.25 | Right level of seniority? |
+| `skills_depth` | 0.20 | Deep expertise or just keywords? |
+| `project_relevance` | 0.12 | Practical evidence of applied skills? |
+| `recency_factor` | 0.08 | Is experience current? |
+
+Weights must sum to 1.0. Configurable in `config.yaml`.
+
+### Evaluation (runs after every match)
+
+- **Ranking stability:** Perturbs weights ±10%, checks if top-3 changes
+- **Score distribution:** Detects broken pipelines (all-same, too-narrow)
+- **Bias detection:** Flags experience over-weighting, skill-count correlation
+- **Keyword stuffing:** High keyword match + low depth = suspect
+
+---
+
+## CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `--client-id` | Client identifier (REQUIRED for ingest/match) |
+| `--job-id` | Job opening identifier (REQUIRED for ingest/match) |
+| `--ingest` | Ingest resumes into DB |
+| `--match` | Match stored profiles against JD |
+| `--config` | Path to config file (default: `config.yaml`) |
+| `--resumes` | Resume folder path (default: `./resumes`) |
+| `--jd` | JD file path |
+| `--model` | LLM model (default: from config, e.g. `ollama/llama3`) |
+| `--top` | Show only top N candidates |
+| `--output` | Save JSON results to file |
+| `--debug` | Verbose logging |
+| `--concurrency` | Parallel processing count |
+| `--explain-top` | Only explain top N (saves LLM calls) |
+| `--generate-doc` | Generate DOCX for top N |
+| `--scan-mode` | `db_first` / `folder_only` / `db_only` |
+| `--db-status` | Show DB stats and exit |
+
+---
+
+## Configuration
+
+`config.yaml`:
 
 ```yaml
-model: "anthropic/claude-3-sonnet-20240229"   # Primary (tried first)
-failover_model: "ollama/llama3"                # Fallback (used if primary fails)
+# LLM
+model: "ollama/llama3"
+failover_model: null
+
+# Embedding model (sentence-transformers)
+embedding_model: "all-MiniLM-L6-v2"
+
+# File paths
+resumes_dir: "./resumes"
+jd_dir: "./jd"
+
+# Performance
+concurrency: 3
+explain_top: null
+temperature: 0.1
+max_tokens: 4096
+
+# Scoring weights (must sum to 1.0)
+scoring_weights:
+  must_have_match: 0.35
+  experience_match: 0.25
+  skills_depth: 0.20
+  project_relevance: 0.12
+  recency_factor: 0.08
+
+# Scan mode: db_first | folder_only | db_only
+scan_mode: "db_first"
 ```
 
-### Pre-flight validation
-
-Before the pipeline starts:
-1. Checks if the API key is set (for cloud models)
-2. Pings the primary model to verify availability
-3. If primary is down → pings failover model
-4. Reports which model will be used
-
-### Failover triggers
-
-- Missing API key (`AuthenticationError`)
-- Network timeout or connection error
-- Rate limiting (`429 Too Many Requests`)
-- Model not found or unavailable
-
-Once failed over, all subsequent calls use the failover model (no ping-pong).
+Database connection via `DATABASE_URL` env var (default: `postgresql://matcher:matcher_secret@localhost:5432/resume_matcher`).
 
 ---
 
-## Scoring Weights — Design Rationale
+## Logging
 
-### The 5 Dimensions
-
-These map to the 5 signals a recruiter evaluates when screening resumes:
-
-| Dimension | Weight | Recruiter's Question |
-|-----------|--------|---------------------|
-| `must_have_match` | 0.35 | "Does this person have the required skills?" |
-| `experience_match` | 0.25 | "Do they have enough years at this level?" |
-| `skills_depth` | 0.20 | "Do they actually know these technologies deeply?" |
-| `project_relevance` | 0.12 | "Have they built relevant things?" |
-| `recency_factor` | 0.08 | "Is their experience current?" |
-
-### Why These Specific Weights?
-
-- **35% must-have skills** — The gatekeeper. If a candidate lacks 3 of 5 must-have skills, they're out regardless of experience. Highest weight because it's a hard filter.
-- **25% experience** — Seniority matters. A Lead role needs someone who's led teams, not a fresh grad with matching keywords.
-- **20% depth** — Separates "I've used Docker once" from "I've built production Kubernetes clusters." Uses semantic embeddings to detect depth beyond exact keyword matching.
-- **12% projects** — Practical evidence. Lower weight because not all resumes list projects (senior engineers often describe work in responsibilities instead).
-- **8% recency** — A tiebreaker. If two candidates score the same on everything else, the one with more recent experience wins. Low weight because skills don't expire quickly.
-
-### Customizing for Different Role Types
-
-```yaml
-# Senior IC role (skills matter most):
-scoring_weights:
-  must_have_match: 0.40
-  experience_match: 0.20
-  skills_depth: 0.25
-  project_relevance: 0.10
-  recency_factor: 0.05
-
-# Leadership role (experience matters most):
-scoring_weights:
-  must_have_match: 0.25
-  experience_match: 0.35
-  skills_depth: 0.15
-  project_relevance: 0.15
-  recency_factor: 0.10
-
-# Junior role (potential over experience):
-scoring_weights:
-  must_have_match: 0.30
-  experience_match: 0.10
-  skills_depth: 0.25
-  project_relevance: 0.25
-  recency_factor: 0.10
+```
+logs/
+├── ingest.log              ← Written during --ingest
+├── ingest.log.2026-07-11   ← Yesterday's rolled log
+├── match.log               ← Written during --match
+└── match.log.2026-07-11    ← Rolled daily, 30-day retention
 ```
 
-**The only rule:** weights must sum to 1.0. If they don't, the scorer auto-normalizes and logs a warning.
+Format: `2026-07-12 23:30:48 | INFO | module_name | message`
 
----
-
-## Template-Based Resume Generation (`--generate-doc`)
-
-After the pipeline ranks candidates, you can auto-generate formatted DOCX documents using your company's resume template.
-
-### How It Works
-
-1. **Template is read-only** — Your template in `template/` is never modified.
-2. **Data is filled** — Candidate profile data (name, contact, summary, skills, experience, education, certifications) is populated into a fresh copy.
-3. **Output is saved** — `rendered/{rank}_Antern_{original_filename}.docx`
-
-### Usage
-
-```bash
-# Generate for top 3 candidates
-python run.py --match --generate-doc 3
-
-# Combine with JSON export
-python run.py --match --generate-doc 3 --output results.json
-```
-
-### What Gets Filled
-
-| Template Section | Data Source |
-|-----------------|-------------|
-| NAME | `ResumeProfile.full_name` (uppercase) |
-| Contact / Email | `ResumeProfile.phone`, `email`, `location` |
-| PROFESSIONAL SUMMARY | `ResumeProfile.career_summary` |
-| TECHNICAL SKILLS | `ResumeProfile.skills[]` (comma-separated) |
-| EXPERIENCE | `ResumeProfile.work_experiences[]` (title, company, dates, responsibilities) |
-| EDUCATION | `ResumeProfile.education[]` |
-| CERTIFICATIONS | `ResumeProfile.certifications[]` |
-
-### Setup
-
-Place your company's DOCX template in the `template/` folder. The first `.docx` file found is used. The template should have section headers (PROFESSIONAL SUMMARY, TECHNICAL SKILLS, EXPERIENCE, EDUCATION, CERTIFICATIONS) as markers.
-
----
-
-## API Keys (`.env` file)
-
-### Setup
-
-```bash
-cp .env.example .env
-```
-
-Then edit `.env` and add your keys:
-
-```bash
-# Anthropic (Claude)
-ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-
-# OpenAI (GPT-4)
-OPENAI_API_KEY=sk-your-key-here
-
-# AWS Bedrock (if using bedrock/ models)
-AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxxxxxx
-AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-AWS_REGION_NAME=us-east-1
-```
-
-Keys are auto-loaded by the script via `python-dotenv`. The `.env` file is git-ignored — never commit it.
-
-> If using Ollama (local model), no API keys are needed.
+All console output (logger + print) captured in log files.
 
 ---
 
@@ -516,131 +365,57 @@ Keys are auto-loaded by the script via `python-dotenv`. The `.env` file is git-i
 
 ```
 AI-Resume-Matcher/
-├── run.py                              ← Main entry point
-├── config.yaml                         ← Configuration (model, paths, weights, scan_mode)
-├── .env / .env.example                 ← API keys (git-ignored / template)
-├── requirements.txt                    ← Python dependencies
-├── .gitignore                          ← Git ignore rules
-├── README.md                           ← This file
-├── resumes/                            ← Place candidate resumes here (PDF/DOCX/TXT)
-├── jd/                                 ← Place JD file here (PDF/DOCX/TXT)
-├── template/                           ← DOCX template (read-only, never modified)
-├── rendered/                           ← Generated formatted docs (auto-created)
-├── data/
-│   ├── profiles.db                     ← SQLite profile storage
-│   ├── chroma/                         ← ChromaDB embedding storage
-│   └── scanned_files/                  ← Copies of processed resumes
-└── matching_engine/
-    ├── __init__.py
-    ├── models.py                       ← Pydantic data models
-    ├── config.py                       ← AppConfig (settings validation)
-    ├── utils.py                        ← Shared utilities (JSON parsing, text helpers)
-    ├── file_loader.py                  ← Text extraction (PDF/DOCX/TXT, OCR, text boxes)
-    ├── llm_client.py                   ← LLM client with failover + token estimation
-    ├── database.py                     ← NEW: SQLite profile storage & retrieval
-    ├── vector_store.py                 ← NEW: ChromaDB embedding storage & similarity search
-    ├── scanner.py                      ← NEW: File scanner with hash-based deduplication
-    ├── jd_understanding.py             ← Stage 1: LLM-based JD parsing
-    ├── resume_understanding.py         ← Stage 2: Regex + LLM resume parsing
-    ├── semantic_matching.py            ← Stage 3: Embedding similarity (6 dimensions)
-    ├── scoring.py                      ← Stage 4: Weighted scoring formula
-    ├── explainability.py               ← Stage 5: LLM explanation + rule-based fallback
-    ├── pipeline.py                     ← Pipeline orchestrator (concurrent stages)
-    └── template_renderer.py            ← DOCX template rendering (--generate-doc)
+├── run.py                        ← CLI entry point
+├── docker-compose.yml            ← PostgreSQL + pgvector
+├── config.yaml                   ← Runtime configuration
+├── requirements.txt              ← Python dependencies
+├── .env                          ← API keys, DATABASE_URL (git-ignored)
+├── .gitignore
+├── api/
+│   ├── __init__.py
+│   ├── server.py                 ← FastAPI endpoints
+│   ├── auth.py                   ← API key authentication
+│   └── tasks.py                  ← Async task manager
+├── matching_engine/
+│   ├── models.py                 ← Pydantic data models
+│   ├── database.py               ← PostgreSQL profile storage
+│   ├── vector_store.py           ← pgvector + hybrid search
+│   ├── scanner.py                ← Ingest (TF-IDF + hallucination check)
+│   ├── hallucination_check.py    ← Grounding verification
+│   ├── evaluation.py             ← Scoring validation + bias detection
+│   ├── jd_understanding.py       ← Stage 1: JD parsing
+│   ├── resume_understanding.py   ← Stage 2: Resume parsing
+│   ├── semantic_matching.py      ← Stage 3: Embedding similarity
+│   ├── scoring.py                ← Stage 4: Weighted scoring
+│   ├── explainability.py         ← Stage 5: AI reasoning
+│   ├── template_renderer.py      ← Stage 6: DOCX generation
+│   ├── pipeline.py               ← Pipeline orchestrator
+│   ├── llm_client.py             ← LiteLLM wrapper + failover
+│   ├── file_loader.py            ← PDF/DOCX/TXT extraction
+│   └── utils.py                  ← Shared utilities
+├── logs/                         ← Daily rolling log files
+├── data/uploads/                 ← Files received via API
+├── resumes/                      ← CLI input resumes (git-ignored)
+├── jd/                           ← CLI input JDs (git-ignored)
+└── template/                     ← DOCX template (read-only)
 ```
 
 ---
 
 ## Troubleshooting
 
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| JD shows 0 characters | Scanned/image-based PDF | Install OCR: `brew install tesseract poppler && pip install pytesseract pdf2image` |
-| All scores identical | Ollama not running or JD empty | Script auto-starts Ollama. Check if JD has extractable text. |
-| SSL certificate errors | Corporate proxy (Zscaler) | Handled automatically (sets `LITELLM_LOCAL_MODEL_COST_MAP=True`) |
-| Embedding model fails | SSL blocks HuggingFace download | Framework auto-patches httpx SSL verification |
-| LLM returns bad JSON | Model too small | Use `ollama/llama3` or larger; framework retries 3× with fallbacks |
-| DOCX shows minimal text | Content in text boxes/tables | Framework extracts from paragraphs, tables, text boxes, hyperlinks |
-| Name/email/phone missing | LLM failed extraction | Regex baseline always extracts contact info as fallback |
-| Ollama not installed | Binary not found | `brew install ollama` or https://ollama.com/download |
-| Model not found | Not pulled yet | Script auto-pulls on first run, or: `ollama pull llama3` |
-| Slow (100+ resumes) | Processing sequentially | Use `--concurrency 5 --explain-top 10` |
-| DB match returns 0 | No resumes ingested yet | Run `python run.py --ingest` first |
-| Duplicate profiles in DB | Same resume processed twice | Hash-based dedup prevents this; use `--db-status` to check |
-| ChromaDB errors | Corrupted vector store | Delete `data/chroma/` and re-ingest: `python run.py --ingest` |
-| `--match` is slow | Explain-all enabled for many profiles | Use `--explain-top 10` to limit LLM explanations |
-
----
-
-## Example Usage
-
-```bash
-# ── First time setup ──────────────────────────────────────────────────────────
-
-# Process all resumes into the database (requires --client-id and --job-id)
-python run.py --ingest --client-id ACME_CORP --job-id JOB-001
-
-# Check what's in the database (shows per-client breakdown)
-python run.py --db-status
-
-# ── Day-to-day usage ─────────────────────────────────────────────────────────
-
-# Match against a new JD (fast, client-scoped, ~20 seconds from DB)
-python run.py --match --client-id ACME_CORP --job-id JOB-002
-
-# Match with only top 5 results shown
-python run.py --match --client-id ACME_CORP --job-id JOB-002 --top 5
-
-# Full pipeline: ingest new resumes + match from DB (default mode)
-python run.py --client-id ACME_CORP --job-id JOB-001
-
-# ── Multi-tenant usage ───────────────────────────────────────────────────────
-
-# Ingest for a different client (completely isolated pool)
-python run.py --ingest --client-id CLIENT_B --job-id JOB-201
-
-# Match for Client B (ACME_CORP resumes are NEVER visible)
-python run.py --match --client-id CLIENT_B --job-id JOB-201
-
-# ── Advanced usage ───────────────────────────────────────────────────────────
-
-# Bypass DB entirely (original folder-scan behavior, no client-id needed)
-python run.py --scan-mode folder_only
-
-# Only use what's in DB, never touch the folder
-python run.py --scan-mode db_only --match --client-id ACME_CORP --job-id JOB-001
-
-# Generate formatted DOCX for top 3 + export JSON
-python run.py --match --generate-doc 3 --output results.json
-
-# Use a different model with higher concurrency
-python run.py --model gpt-4 --concurrency 8 --explain-top 10
-
-# Debug mode (verbose logging)
-python run.py --debug --match
-```
-
----
-
-## Example Output
-
-### Terminal (Summary Table)
-
-```
-⏱  Pipeline completed in 18.7 seconds (5 profiles from DB)
-
-====================================================================================================================
-RESULTS — Candidate Match Grid (sorted by % Qualified)
-====================================================================================================================
-#   Source File                     First Name   Last Name       Exp(Yrs)  % Match  Key Skills (Top 3)                  Action
---------------------------------------------------------------------------------------------------------------------
-1   DevSecOps_MLOps_v3.docx         Kumar        Karpuram        17.0      59.7%    MLOps, Docker, Kubernetes            👍 Consider for interview
-2   Kumar_DevSecOps_MLOps_v1.pdf    Kumar        Karpuram        13.0      56.6%    Python, AWS, Terraform               👍 Consider for interview
-3   Jyothi Kancharla.docx           Jyothi       Kancharla       15.0      52.2%    Data Science, Python, NLP            👍 Consider for interview
-4   Arun Prasad Resume.pdf          Arun         Prasad          17.0      50.9%    Java, Spring, Microservices          ⚠️  May need additional screening
-5   Resume_Sr.Engineering_Spec...   Kumar        K               13.0      32.0%    Selenium, Java, DevOps               ⚠️  May need additional screening
-====================================================================================================================
-```
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError: psycopg` | `pip install psycopg[binary]` |
+| `connection refused` to PostgreSQL | `docker-compose up -d` (start the container) |
+| `pgvector extension not found` | Use `pgvector/pgvector:pg16` image (already in docker-compose) |
+| JD returns 0 skills | LLM returned dicts instead of strings — handled by `_normalize_string_list()` |
+| Hallucination false positives | Compound skills are split on delimiters; >50% sub-terms grounded = pass |
+| SSL certificate errors | Handled automatically (patches httpx SSL for Zscaler proxy) |
+| Ollama not running | Script auto-starts it; or run `ollama serve` manually |
+| Model not found | Script auto-pulls; or run `ollama pull llama3` |
+| API 401/403 | Check `X-API-Key` header matches `AI_MATCHER_API_KEYS` env var |
+| Slow ingest (many resumes) | Use `--concurrency 5` for cloud models, keep at 1 for Ollama |
 
 ---
 
