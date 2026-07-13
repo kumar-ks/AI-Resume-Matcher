@@ -1,114 +1,145 @@
 """
-Vector Store — ChromaDB Multi-Field Embedding Storage & Search
+Vector Store — PostgreSQL + pgvector Embedding Storage & Search
 ================================================================
 
-Stores and retrieves resume embeddings using ChromaDB for fast
-semantic similarity search. Uses 3 separate collections for
-multi-field embeddings to improve retrieval precision.
+Stores and retrieves resume embeddings using PostgreSQL with the pgvector
+extension. Replaces ChromaDB for production-grade concurrent access at scale.
 
 MULTI-FIELD EMBEDDING STRATEGY:
-    - skills_embeddings: Technical skills, tools, technologies, certifications
-    - experience_embeddings: Role titles, companies, domains, responsibilities
-    - summary_embeddings: Career summary, key achievements, domain expertise
+    Three rows per resume (one per field type):
+    - skills: Technologies, tools, certifications
+    - experience: Role titles, companies, domains
+    - summary: Career summary, achievements, expertise
 
-    At query time, the JD is embedded and queried against all 3 collections.
-    Results are fused using Reciprocal Rank Fusion (RRF) for a combined ranking.
+    At query time, the JD is embedded and queried against all 3 field types.
+    Results are fused using weighted Reciprocal Rank Fusion (RRF) + BM25 hybrid.
 
 MULTI-TENANT ISOLATION:
-    - Every embedding is tagged with client_id in metadata
+    - Every embedding row has client_id column
     - Queries ALWAYS filter by client_id (NDA enforcement)
-    - Embeddings from one client are NEVER returned for another client
+
+TABLE SCHEMA:
+    resume_embeddings:
+        id          SERIAL PRIMARY KEY
+        client_id   TEXT NOT NULL
+        job_id      TEXT NOT NULL
+        file_hash   TEXT NOT NULL
+        field_type  TEXT NOT NULL  ('skills', 'experience', 'summary')
+        content     TEXT           (the text that was embedded)
+        embedding   VECTOR(384)    (sentence-transformers output)
+        metadata    JSONB          (source_file, full_name, experience_years, etc.)
+        created_at  TIMESTAMPTZ
+        UNIQUE(client_id, file_hash, field_type)
+
+    Indexes:
+        - HNSW index on embedding for fast ANN search
+        - B-tree on client_id for partition filtering
+        - GIN on content for full-text search (BM25 replacement)
 
 CALLED BY:
     - scanner.py → ingest mode (stores embeddings)
-    - run.py → match mode (queries similar candidates)
+    - run.py / api/server.py → match mode (queries similar candidates)
 """
 
+import json
 import logging
+import math
+import os
+import re
 from pathlib import Path
 from typing import Optional
 
+import psycopg
+from psycopg.rows import dict_row
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_VECTOR_STORE_PATH = Path("data/chroma")
+DEFAULT_DATABASE_URL = "postgresql://matcher:matcher_secret@localhost:5432/resume_matcher"
 
-# Three collections for multi-field embeddings
-COLLECTION_SKILLS = "resume_skills"
-COLLECTION_EXPERIENCE = "resume_experience"
-COLLECTION_SUMMARY = "resume_summary"
-
-# Weights for fusing results from each collection
+# Weights for fusing results from each field type
 FUSION_WEIGHTS = {
-    "skills": 0.45,      # Skills matter most for matching
-    "experience": 0.35,  # Role/domain alignment
-    "summary": 0.20,     # General career context
+    "skills": 0.45,
+    "experience": 0.35,
+    "summary": 0.20,
 }
+
+# Hybrid search weights
+VECTOR_WEIGHT = 0.65
+BM25_WEIGHT = 0.35
 
 
 class VectorStore:
     """
-    ChromaDB-based vector store with multi-field embeddings and client isolation.
+    PostgreSQL + pgvector based vector store with multi-field embeddings.
 
     Stores 3 embeddings per resume (skills, experience, summary) and fuses
-    results at query time for better retrieval precision.
+    results at query time using RRF + BM25 for hybrid search.
 
     Usage:
-        vs = VectorStore(persist_path="data/chroma")
+        vs = VectorStore()
         vs.store_multi_field(file_hash="abc", client_id="C1", job_id="J1",
                             skills_text="...", experience_text="...", summary_text="...",
                             metadata={...})
         results = vs.query_similar(jd_text="...", client_id="C1", top_n=20)
     """
 
-    def __init__(self, persist_path: str | Path = DEFAULT_VECTOR_STORE_PATH):
+    def __init__(self, database_url: Optional[str] = None):
         """
-        Initialize ChromaDB with 3 collections for multi-field embeddings.
+        Initialize PostgreSQL connection with pgvector extension.
 
         Args:
-            persist_path: Directory where ChromaDB stores its data files
+            database_url: PostgreSQL connection string.
+                          Falls back to DATABASE_URL env var or default.
         """
-        import chromadb
-        import os
-
-        self.persist_path = Path(persist_path)
-        self.persist_path.mkdir(parents=True, exist_ok=True)
-
-        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-        # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(path=str(self.persist_path))
-
-        # Create 3 collections for multi-field embeddings
-        self.skills_collection = self.client.get_or_create_collection(
-            name=COLLECTION_SKILLS,
-            metadata={"description": "Skills, tools, technologies, certifications"},
-        )
-        self.experience_collection = self.client.get_or_create_collection(
-            name=COLLECTION_EXPERIENCE,
-            metadata={"description": "Role titles, companies, domains"},
-        )
-        self.summary_collection = self.client.get_or_create_collection(
-            name=COLLECTION_SUMMARY,
-            metadata={"description": "Career summary, achievements, expertise"},
-        )
-
-        # Also keep the legacy single collection for backward compatibility
-        self.collection = self.client.get_or_create_collection(
-            name="resume_embeddings",
-            metadata={"description": "Legacy single-field embeddings"},
-        )
-
+        self.database_url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+        self.conn = psycopg.connect(self.database_url, row_factory=dict_row)
         self._embedding_model = None
+        self._setup_pgvector()
+        logger.info("VectorStore initialized (PostgreSQL + pgvector)")
 
-        total = (self.skills_collection.count() +
-                 self.experience_collection.count() +
-                 self.summary_collection.count())
-        logger.info(
-            f"VectorStore initialized: {self.persist_path} "
-            f"(skills={self.skills_collection.count()}, "
-            f"experience={self.experience_collection.count()}, "
-            f"summary={self.summary_collection.count()}, total={total})"
-        )
+    def _setup_pgvector(self) -> None:
+        """Create pgvector extension, table, and indexes."""
+        with self.conn.cursor() as cur:
+            # Enable pgvector extension
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+            # Create embeddings table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS resume_embeddings (
+                    id SERIAL PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    field_type TEXT NOT NULL,
+                    content TEXT DEFAULT '',
+                    embedding VECTOR(384),
+                    metadata JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(client_id, file_hash, field_type)
+                )
+            """)
+
+            # B-tree index for client filtering
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embeddings_client
+                ON resume_embeddings(client_id)
+            """)
+
+            # HNSW index for fast approximate nearest neighbor search
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw
+                ON resume_embeddings USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+            """)
+
+            # GIN index for full-text search (BM25 replacement)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embeddings_fts
+                ON resume_embeddings USING gin (to_tsvector('english', content))
+            """)
+
+        self.conn.commit()
+        logger.debug("pgvector extension and tables created")
 
     @property
     def embedding_model(self):
@@ -116,9 +147,8 @@ class VectorStore:
         if self._embedding_model is None:
             import httpx
             from sentence_transformers import SentenceTransformer
-            import os
 
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
             _original = httpx.Client.__init__
             def _patched(self_client, *args, **kwargs):
@@ -156,68 +186,54 @@ class VectorStore:
         metadata: Optional[dict] = None,
     ) -> None:
         """
-        Store 3 separate embeddings for a resume (skills, experience, summary).
+        Store 3 embeddings (skills, experience, summary) for a resume.
 
         Args:
-            file_hash: Unique identifier for this resume (MD5 of file)
-            client_id: Client identifier (NDA isolation boundary)
+            file_hash: MD5 hash of resume file
+            client_id: Client identifier (NDA isolation)
             job_id: Job opening identifier
-            skills_text: Curated text of skills/technologies/certifications
-            experience_text: Role titles, companies, domains
-            summary_text: Career summary, achievements, expertise
-            metadata: Optional additional metadata (source_file, name, etc.)
-
-        Raises:
-            ValueError: If client_id or job_id is empty
+            skills_text: Curated skills/technologies text
+            experience_text: Role titles, companies text
+            summary_text: Career summary text
+            metadata: Additional metadata (source_file, full_name, etc.)
         """
         if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for storing embeddings (NDA enforcement)")
+            raise ValueError("client_id is required (NDA enforcement)")
         if not job_id or not job_id.strip():
-            raise ValueError("job_id is required for storing embeddings")
+            raise ValueError("job_id is required")
 
-        # Build metadata (always includes client_id and job_id)
-        meta = {
-            "client_id": client_id.strip(),
-            "job_id": job_id.strip(),
-            "file_hash": file_hash,
+        meta_json = json.dumps(metadata or {})
+        fields = {
+            "skills": skills_text,
+            "experience": experience_text,
+            "summary": summary_text,
         }
-        if metadata:
-            for k, v in metadata.items():
-                if isinstance(v, (str, int, float, bool)):
-                    meta[k] = v
-                elif v is None:
-                    meta[k] = ""
-                else:
-                    meta[k] = str(v)
 
-        doc_id = f"{client_id.strip()}_{file_hash}"
+        for field_type, text in fields.items():
+            if not text or not text.strip():
+                continue
 
-        # Embed and store in each collection
-        if skills_text.strip():
-            skills_emb = self._embed([skills_text[:1500]])[0]
-            self.skills_collection.upsert(
-                ids=[doc_id], embeddings=[skills_emb],
-                documents=[skills_text[:1500]], metadatas=[meta],
-            )
+            truncated = text[:1500]
+            embedding = self._embed([truncated])[0]
 
-        if experience_text.strip():
-            exp_emb = self._embed([experience_text[:1500]])[0]
-            self.experience_collection.upsert(
-                ids=[doc_id], embeddings=[exp_emb],
-                documents=[experience_text[:1500]], metadatas=[meta],
-            )
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO resume_embeddings
+                        (client_id, job_id, file_hash, field_type, content, embedding, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s::vector, %s::jsonb)
+                    ON CONFLICT (client_id, file_hash, field_type) DO UPDATE SET
+                        job_id = EXCLUDED.job_id,
+                        content = EXCLUDED.content,
+                        embedding = EXCLUDED.embedding,
+                        metadata = EXCLUDED.metadata,
+                        created_at = NOW()
+                """, (
+                    client_id.strip(), job_id.strip(), file_hash,
+                    field_type, truncated, str(embedding), meta_json,
+                ))
 
-        if summary_text.strip():
-            sum_emb = self._embed([summary_text[:1500]])[0]
-            self.summary_collection.upsert(
-                ids=[doc_id], embeddings=[sum_emb],
-                documents=[summary_text[:1500]], metadatas=[meta],
-            )
-
-        logger.debug(
-            f"Stored multi-field embeddings for hash={file_hash[:8]}... "
-            f"client={client_id}, job={job_id}"
-        )
+        self.conn.commit()
+        logger.debug(f"Stored multi-field embeddings: hash={file_hash[:8]}... client={client_id}")
 
     def store_embedding(
         self,
@@ -227,226 +243,198 @@ class VectorStore:
         job_id: str,
         metadata: Optional[dict] = None,
     ) -> None:
-        """
-        Legacy single-field store. Kept for backward compatibility.
-        New code should use store_multi_field() instead.
-        """
-        if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for storing embeddings (NDA enforcement)")
-        if not job_id or not job_id.strip():
-            raise ValueError("job_id is required for storing embeddings")
-
-        embed_text = text[:2000] if len(text) > 2000 else text
-        embedding = self._embed([embed_text])[0]
-
-        meta = {"client_id": client_id.strip(), "job_id": job_id.strip()}
-        if metadata:
-            for k, v in metadata.items():
-                if isinstance(v, (str, int, float, bool)):
-                    meta[k] = v
-                elif v is None:
-                    meta[k] = ""
-                else:
-                    meta[k] = str(v)
-
-        doc_id = f"{client_id.strip()}_{file_hash}"
-        self.collection.upsert(
-            ids=[doc_id], embeddings=[embedding],
-            documents=[embed_text], metadatas=[meta],
+        """Legacy single-field store. Stores as 'skills' field type for compat."""
+        self.store_multi_field(
+            file_hash=file_hash,
+            client_id=client_id,
+            job_id=job_id,
+            skills_text=text,
+            experience_text="",
+            summary_text="",
+            metadata=metadata,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # QUERY (MULTI-FIELD WITH RECIPROCAL RANK FUSION)
+    # QUERY (HYBRID: VECTOR + FULL-TEXT SEARCH, CLIENT-SCOPED)
     # ─────────────────────────────────────────────────────────────────────────
 
     def query_similar(self, jd_text: str, client_id: str, top_n: int = 20) -> list[dict]:
         """
-        Find top-N similar resumes using multi-field query with rank fusion.
+        Hybrid search: vector similarity + full-text search, fused with RRF.
 
-        Queries all 3 collections (skills, experience, summary) and fuses
-        results using weighted Reciprocal Rank Fusion (RRF).
-
-        Falls back to legacy single collection if multi-field collections are empty.
-
-        NDA ENFORCEMENT: Only returns embeddings belonging to the given client_id.
+        NDA ENFORCEMENT: Only returns results for the given client_id.
 
         Args:
-            jd_text: The job description text to match against
-            client_id: Client identifier — strict isolation filter
-            top_n: Number of results to return (default: 20)
+            jd_text: Job description text to match against
+            client_id: Client identifier (strict isolation)
+            top_n: Number of results to return
 
         Returns:
-            List of dicts with 'file_hash', 'distance', 'metadata', 'document', 'rrf_score'
+            List of dicts with file_hash, hybrid_score, metadata
         """
         if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for querying embeddings (NDA enforcement)")
+            raise ValueError("client_id is required (NDA enforcement)")
 
-        # Check if multi-field collections have data
-        has_multi = self.skills_collection.count() > 0
-
-        if has_multi:
-            return self._query_multi_field(jd_text, client_id, top_n)
-        else:
-            # Fallback to legacy single collection
-            return self._query_legacy(jd_text, client_id, top_n)
-
-    def _query_multi_field(self, jd_text: str, client_id: str, top_n: int) -> list[dict]:
-        """Query all 3 collections and fuse with weighted RRF."""
+        # Embed the JD text
         jd_embedding = self._embed([jd_text[:2000]])[0]
-        query_n = min(top_n * 3, 100)  # Over-fetch for better fusion
 
-        # Query each collection
-        results_by_field = {}
-        collections = {
-            "skills": self.skills_collection,
-            "experience": self.experience_collection,
-            "summary": self.summary_collection,
-        }
-
-        for field_name, coll in collections.items():
-            if coll.count() == 0:
-                results_by_field[field_name] = []
-                continue
-
-            actual_n = min(query_n, coll.count())
-            try:
-                res = coll.query(
-                    query_embeddings=[jd_embedding],
-                    n_results=actual_n,
-                    where={"client_id": client_id.strip()},
-                )
-                results_by_field[field_name] = res
-            except Exception as e:
-                logger.warning(f"Query failed for {field_name} collection: {e}")
-                results_by_field[field_name] = []
-
-        # Reciprocal Rank Fusion (RRF)
-        rrf_scores: dict[str, float] = {}  # doc_id → fused score
-        doc_metadata: dict[str, dict] = {}
-        doc_documents: dict[str, str] = {}
+        # ── Vector search per field type with RRF fusion ──────────────────────
+        rrf_scores: dict[str, float] = {}
+        file_metadata: dict[str, dict] = {}
         k = 60  # RRF constant
 
-        for field_name, res in results_by_field.items():
-            if not res or not res.get("ids") or not res["ids"][0]:
-                continue
+        for field_type, weight in FUSION_WEIGHTS.items():
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT file_hash, metadata,
+                           1 - (embedding <=> %s::vector) AS cosine_similarity
+                    FROM resume_embeddings
+                    WHERE client_id = %s AND field_type = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                """, (
+                    str(jd_embedding), client_id.strip(), field_type,
+                    str(jd_embedding), top_n * 3,
+                ))
+                rows = cur.fetchall()
 
-            weight = FUSION_WEIGHTS.get(field_name, 0.33)
-
-            for rank, doc_id in enumerate(res["ids"][0]):
+            for rank, row in enumerate(rows):
+                fh = row["file_hash"]
                 rrf_score = weight * (1.0 / (k + rank + 1))
-                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + rrf_score
+                rrf_scores[fh] = rrf_scores.get(fh, 0.0) + rrf_score
+                if fh not in file_metadata:
+                    meta = row["metadata"]
+                    file_metadata[fh] = meta if isinstance(meta, dict) else json.loads(meta or "{}")
 
-                # Store metadata from first occurrence
-                if doc_id not in doc_metadata and res.get("metadatas"):
-                    doc_metadata[doc_id] = res["metadatas"][0][rank]
-                if doc_id not in doc_documents and res.get("documents"):
-                    doc_documents[doc_id] = res["documents"][0][rank]
+        # ── Full-text search (BM25 equivalent via PostgreSQL ts_rank) ─────────
+        fts_scores = self._fulltext_search(jd_text, client_id, top_n * 3)
 
-        # Sort by fused RRF score (higher = more relevant)
-        sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        # ── Hybrid fusion ─────────────────────────────────────────────────────
+        max_rrf = max(rrf_scores.values()) if rrf_scores else 1.0
+        max_fts = max(fts_scores.values()) if fts_scores else 1.0
 
-        # Format results
-        prefix = f"{client_id.strip()}_"
-        formatted = []
-        for doc_id in sorted_ids[:top_n]:
-            file_hash = doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
-            formatted.append({
-                "file_hash": file_hash,
-                "distance": 1.0 - rrf_scores[doc_id],  # Convert to distance-like (lower = better)
-                "rrf_score": rrf_scores[doc_id],
-                "metadata": doc_metadata.get(doc_id, {}),
-                "document": doc_documents.get(doc_id, ""),
+        all_hashes = set(rrf_scores.keys()) | set(fts_scores.keys())
+        hybrid_scores: dict[str, float] = {}
+
+        for fh in all_hashes:
+            vec_norm = (rrf_scores.get(fh, 0.0) / max_rrf) if max_rrf > 0 else 0
+            fts_norm = (fts_scores.get(fh, 0.0) / max_fts) if max_fts > 0 else 0
+            hybrid_scores[fh] = VECTOR_WEIGHT * vec_norm + BM25_WEIGHT * fts_norm
+
+        # Sort and return top-N
+        sorted_hashes = sorted(hybrid_scores.keys(), key=lambda x: hybrid_scores[x], reverse=True)
+
+        results = []
+        for fh in sorted_hashes[:top_n]:
+            results.append({
+                "file_hash": fh,
+                "hybrid_score": hybrid_scores[fh],
+                "distance": 1.0 - hybrid_scores[fh],
+                "metadata": file_metadata.get(fh, {}),
             })
 
-        logger.info(
-            f"Multi-field query returned {len(formatted)} results for client={client_id} "
-            f"(RRF fusion across {len([r for r in results_by_field.values() if r])} fields)"
-        )
-        return formatted
+        logger.info(f"Hybrid search: {len(results)} results for client={client_id}")
+        return results
 
-    def _query_legacy(self, jd_text: str, client_id: str, top_n: int) -> list[dict]:
-        """Fallback: query the legacy single collection."""
-        if self.collection.count() == 0:
-            logger.warning("VectorStore is empty — no embeddings to search")
-            return []
+    def _fulltext_search(self, query_text: str, client_id: str, limit: int) -> dict[str, float]:
+        """
+        PostgreSQL full-text search (replaces custom BM25 implementation).
 
-        actual_top_n = min(top_n, self.collection.count())
-        jd_embedding = self._embed([jd_text[:2000]])[0]
+        Uses ts_rank with plainto_tsquery for relevance scoring.
+        """
+        # Extract meaningful terms for the query (skip very short words)
+        terms = re.findall(r'\b[a-zA-Z][a-zA-Z0-9+#.-]{2,}\b', query_text)
+        if not terms:
+            return {}
 
-        results = self.collection.query(
-            query_embeddings=[jd_embedding],
-            n_results=actual_top_n,
-            where={"client_id": client_id.strip()},
-        )
+        # Use plainto_tsquery which handles multiple words as AND
+        query_str = " ".join(terms[:30])  # Limit to 30 terms
 
-        formatted = []
-        if results and results["ids"] and results["ids"][0]:
-            prefix = f"{client_id.strip()}_"
-            for i, doc_id in enumerate(results["ids"][0]):
-                file_hash = doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
-                formatted.append({
-                    "file_hash": file_hash,
-                    "distance": results["distances"][0][i] if results["distances"] else None,
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                    "document": results["documents"][0][i] if results["documents"] else "",
-                })
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT file_hash, ts_rank(
+                    to_tsvector('english', content),
+                    plainto_tsquery('english', %s)
+                ) AS rank
+                FROM resume_embeddings
+                WHERE client_id = %s
+                  AND to_tsvector('english', content) @@ plainto_tsquery('english', %s)
+                ORDER BY rank DESC
+                LIMIT %s
+            """, (query_str, client_id.strip(), query_str, limit))
+            rows = cur.fetchall()
 
-        logger.debug(f"Legacy query returned {len(formatted)} results for client={client_id}")
-        return formatted
+        # Aggregate scores per file_hash (max across field types)
+        scores: dict[str, float] = {}
+        for row in rows:
+            fh = row["file_hash"]
+            scores[fh] = max(scores.get(fh, 0.0), row["rank"])
+
+        return scores
 
     # ─────────────────────────────────────────────────────────────────────────
     # UTILITIES
     # ─────────────────────────────────────────────────────────────────────────
 
     def has_embedding(self, file_hash: str, client_id: str) -> bool:
-        """Check if an embedding exists for the given file hash under a client."""
-        try:
-            doc_id = f"{client_id.strip()}_{file_hash}"
-            result = self.skills_collection.get(ids=[doc_id])
-            return bool(result and result["ids"])
-        except Exception:
-            return False
+        """Check if embeddings exist for a file hash under a client."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM resume_embeddings WHERE client_id = %s AND file_hash = %s LIMIT 1",
+                (client_id.strip(), file_hash)
+            )
+            return cur.fetchone() is not None
 
     def get_count(self, client_id: Optional[str] = None) -> int:
-        """Return total number of profiles stored (based on skills collection)."""
-        if client_id:
-            result = self.skills_collection.get(where={"client_id": client_id.strip()})
-            return len(result["ids"]) if result and result["ids"] else 0
-        return self.skills_collection.count()
+        """Return number of unique profiles (by file_hash) stored."""
+        with self.conn.cursor() as cur:
+            if client_id:
+                cur.execute(
+                    "SELECT COUNT(DISTINCT file_hash) as cnt FROM resume_embeddings WHERE client_id = %s",
+                    (client_id.strip(),)
+                )
+            else:
+                cur.execute("SELECT COUNT(DISTINCT file_hash) as cnt FROM resume_embeddings")
+            return cur.fetchone()["cnt"]
 
     def get_stored_hashes(self, client_id: str) -> set[str]:
-        """Return set of all file hashes stored for a client."""
+        """Return all file hashes stored for a client."""
         if not client_id or not client_id.strip():
             raise ValueError("client_id is required (NDA enforcement)")
 
-        result = self.skills_collection.get(where={"client_id": client_id.strip()})
-        if result and result["ids"]:
-            prefix = f"{client_id.strip()}_"
-            return {
-                doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
-                for doc_id in result["ids"]
-            }
-        return set()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT file_hash FROM resume_embeddings WHERE client_id = %s",
+                (client_id.strip(),)
+            )
+            return {row["file_hash"] for row in cur.fetchall()}
 
     def delete_embedding(self, file_hash: str, client_id: str) -> None:
-        """Delete embeddings across all collections for a file hash."""
-        doc_id = f"{client_id.strip()}_{file_hash}"
-        for coll in [self.skills_collection, self.experience_collection,
-                     self.summary_collection, self.collection]:
-            try:
-                coll.delete(ids=[doc_id])
-            except Exception:
-                pass
-        logger.debug(f"Deleted embeddings for hash={file_hash[:8]}... client={client_id}")
+        """Delete all embeddings for a file hash under a client."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM resume_embeddings WHERE client_id = %s AND file_hash = %s",
+                (client_id.strip(), file_hash)
+            )
+        self.conn.commit()
 
     def get_status(self) -> dict:
-        """Get vector store status information."""
+        """Get vector store status."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(DISTINCT file_hash) as profiles FROM resume_embeddings")
+            profiles = cur.fetchone()["profiles"]
+            cur.execute("SELECT COUNT(*) as total FROM resume_embeddings")
+            total_rows = cur.fetchone()["total"]
+
         return {
-            "persist_path": str(self.persist_path),
-            "embedding_count": self.skills_collection.count(),
-            "skills_count": self.skills_collection.count(),
-            "experience_count": self.experience_collection.count(),
-            "summary_count": self.summary_collection.count(),
-            "legacy_count": self.collection.count(),
-            "collection_name": "multi-field (skills + experience + summary)",
+            "db_type": "PostgreSQL + pgvector",
+            "embedding_count": profiles,
+            "total_embedding_rows": total_rows,
+            "fields_per_profile": 3,
+            "embedding_dim": 384,
+            "index_type": "HNSW (cosine)",
         }
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self.conn.close()

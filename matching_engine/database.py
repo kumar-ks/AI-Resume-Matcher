@@ -1,61 +1,61 @@
 """
-Database Layer — SQLite Profile Storage
-=========================================
+Database Layer — PostgreSQL Profile Storage
+=============================================
 
-Manages persistent storage of extracted resume profiles in SQLite.
-Each resume is processed once (via LLM) and stored; subsequent matches
-read from DB instead of re-extracting.
+Manages persistent storage of extracted resume profiles in PostgreSQL.
+Replaces SQLite for production-grade concurrent access at scale (5M+ profiles).
 
 MULTI-TENANT ISOLATION (NDA ENFORCEMENT):
     - Every profile is tagged with client_id and job_id
-    - ALL read queries MUST filter by client_id
+    - ALL read queries filter by client_id
     - Resumes under one client_id can NEVER be returned for another client
     - Within the same client_id, resumes are shared across job_ids freely
 
 SCHEMA:
     resume_profiles:
-        id              INTEGER PRIMARY KEY
-        client_id       TEXT NOT NULL  (NDA isolation boundary)
-        job_id          TEXT NOT NULL  (job opening identifier)
-        source_file     TEXT    (original filename)
-        source_path     TEXT    (original full path)
-        file_hash       TEXT    (MD5 of file content — detect changes)
-        scanned_copy    TEXT    (path to copy in data/scanned_files/)
-        first_name      TEXT
-        middle_name     TEXT
-        last_name       TEXT
-        email           TEXT
-        phone           TEXT
-        location        TEXT
-        career_summary  TEXT
-        skills          TEXT    (JSON array)
-        total_experience_years REAL
-        work_experiences TEXT   (JSON array of objects)
-        projects        TEXT    (JSON array)
-        education       TEXT    (JSON array)
-        certifications  TEXT    (JSON array)
-        domain_expertise TEXT   (JSON array)
-        raw_text        TEXT
-        extracted_at    TEXT    (ISO timestamp)
+        id                      SERIAL PRIMARY KEY
+        client_id               TEXT NOT NULL
+        job_id                  TEXT NOT NULL
+        source_file             TEXT NOT NULL
+        source_path             TEXT
+        file_hash               TEXT NOT NULL
+        first_name              TEXT
+        middle_name             TEXT
+        last_name               TEXT
+        email                   TEXT
+        phone                   TEXT
+        location                TEXT
+        career_summary          TEXT
+        skills                  JSONB
+        total_experience_years  REAL
+        work_experiences        JSONB
+        projects                JSONB
+        education               JSONB
+        certifications          JSONB
+        domain_expertise        JSONB
+        raw_text                TEXT
+        extracted_at            TIMESTAMPTZ
+        UNIQUE(client_id, file_hash)
 
-    UNIQUE CONSTRAINT: (client_id, file_hash)
-        Same file CAN exist under different clients (separate ingest).
-        Same file CANNOT be duplicated within the same client.
+CONNECTION:
+    Uses psycopg (sync driver) for both CLI and API modes.
+    Connection string from DATABASE_URL env var or config.yaml.
 
 CALLED BY:
-    - run.py → --ingest mode (writes profiles)
-    - run.py → --match mode (reads profiles)
-    - matching_engine.scanner (async background scanner)
+    - scanner.py → ingest mode (writes profiles)
+    - run.py / api/server.py → match mode (reads profiles)
 """
 
 import hashlib
 import json
 import logging
-import shutil
-import sqlite3
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+import psycopg
+from psycopg.rows import dict_row
 
 from matching_engine.models import (
     Project,
@@ -65,92 +65,77 @@ from matching_engine.models import (
 
 logger = logging.getLogger(__name__)
 
-# Default database path
-DEFAULT_DB_PATH = Path("data/profiles.db")
-DEFAULT_SCANNED_FILES_PATH = Path("data/scanned_files")
+# Default connection string (override via DATABASE_URL env var or config)
+DEFAULT_DATABASE_URL = "postgresql://matcher:matcher_secret@localhost:5432/resume_matcher"
 
 
 class ProfileDatabase:
     """
-    SQLite-based storage for extracted resume profiles with client isolation.
+    PostgreSQL-based storage for extracted resume profiles with client isolation.
 
     STRICT RULE: All read operations require a client_id parameter.
     Profiles from one client are NEVER visible to another client.
 
     Usage:
-        db = ProfileDatabase(db_path="data/profiles.db")
-        db.store_profile(profile, source_file, source_path, file_hash, client_id="C1", job_id="J1")
+        db = ProfileDatabase()
+        db.store_profile(profile, source_file, source_path, file_hash, client_id, job_id)
         profiles = db.get_all_profiles(client_id="C1")
-        is_new = db.needs_processing(file_path, client_id="C1")
     """
 
-    def __init__(
-        self,
-        db_path: str | Path = DEFAULT_DB_PATH,
-        scanned_files_path: str | Path = DEFAULT_SCANNED_FILES_PATH,
-    ):
+    def __init__(self, database_url: Optional[str] = None, **kwargs):
         """
-        Initialize database connection and ensure tables exist.
+        Initialize PostgreSQL connection and ensure tables exist.
 
         Args:
-            db_path: Path to SQLite database file (created if not exists)
-            scanned_files_path: Directory to store copies of processed resumes
+            database_url: PostgreSQL connection string.
+                          Falls back to DATABASE_URL env var or default.
+            **kwargs: Ignored (for backward compat with old SQLite args like db_path)
         """
-        self.db_path = Path(db_path)
-        self.scanned_files_path = Path(scanned_files_path)
-
-        # Ensure directories exist
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.scanned_files_path.mkdir(parents=True, exist_ok=True)
-
-        # Connect and create tables
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        self.database_url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+        self.conn = psycopg.connect(self.database_url, row_factory=dict_row)
         self._create_tables()
-
-        logger.info(f"ProfileDatabase initialized: {self.db_path}")
+        logger.info("ProfileDatabase initialized (PostgreSQL)")
 
     def _create_tables(self) -> None:
-        """Create the resume_profiles table if it doesn't exist."""
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS resume_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                client_id TEXT NOT NULL,
-                job_id TEXT NOT NULL,
-                source_file TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                file_hash TEXT NOT NULL,
-                scanned_copy TEXT,
-                first_name TEXT DEFAULT '',
-                middle_name TEXT,
-                last_name TEXT DEFAULT '',
-                email TEXT,
-                phone TEXT,
-                location TEXT,
-                career_summary TEXT DEFAULT '',
-                skills TEXT DEFAULT '[]',
-                total_experience_years REAL,
-                work_experiences TEXT DEFAULT '[]',
-                projects TEXT DEFAULT '[]',
-                education TEXT DEFAULT '[]',
-                certifications TEXT DEFAULT '[]',
-                domain_expertise TEXT DEFAULT '[]',
-                raw_text TEXT DEFAULT '',
-                extracted_at TEXT NOT NULL,
-                UNIQUE(client_id, file_hash)
-            )
-        """)
-        # Indexes for fast client-scoped queries
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_profiles_client_id
-            ON resume_profiles(client_id)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_profiles_client_job
-            ON resume_profiles(client_id, job_id)
-        """)
+        """Create tables and indexes if they don't exist."""
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS resume_profiles (
+                    id SERIAL PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    file_hash TEXT NOT NULL,
+                    first_name TEXT DEFAULT '',
+                    middle_name TEXT,
+                    last_name TEXT DEFAULT '',
+                    email TEXT,
+                    phone TEXT,
+                    location TEXT,
+                    career_summary TEXT DEFAULT '',
+                    skills JSONB DEFAULT '[]',
+                    total_experience_years REAL,
+                    work_experiences JSONB DEFAULT '[]',
+                    projects JSONB DEFAULT '[]',
+                    education JSONB DEFAULT '[]',
+                    certifications JSONB DEFAULT '[]',
+                    domain_expertise JSONB DEFAULT '[]',
+                    raw_text TEXT DEFAULT '',
+                    extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(client_id, file_hash)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_profiles_client_id
+                ON resume_profiles(client_id)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_profiles_client_job
+                ON resume_profiles(client_id, job_id)
+            """)
         self.conn.commit()
-        logger.debug("Database tables verified/created")
+        logger.debug("PostgreSQL tables verified/created")
 
     # ─────────────────────────────────────────────────────────────────────────
     # WRITE OPERATIONS
@@ -166,20 +151,21 @@ class ProfileDatabase:
         job_id: str,
     ) -> int:
         """
-        Store an extracted ResumeProfile in the database.
+        Store an extracted ResumeProfile in PostgreSQL.
 
-        Also copies the original resume file to scanned_files/ for reference.
+        Uses UPSERT (ON CONFLICT) so re-ingesting the same file for the same
+        client updates the existing row rather than failing.
 
         Args:
             profile: Extracted ResumeProfile from Stage 2
-            source_file: Original filename (e.g., "resume.pdf")
+            source_file: Original filename
             source_path: Full path to original file
             file_hash: MD5 hash of file content
-            client_id: Client identifier (NDA isolation boundary) — REQUIRED
-            job_id: Job opening identifier — REQUIRED
+            client_id: Client identifier (NDA isolation)
+            job_id: Job opening identifier
 
         Returns:
-            Row ID of the inserted record
+            Row ID of the inserted/updated record
 
         Raises:
             ValueError: If client_id or job_id is empty
@@ -189,202 +175,148 @@ class ProfileDatabase:
         if not job_id or not job_id.strip():
             raise ValueError("job_id is required for storing profiles")
 
-        # Copy the resume file to scanned_files/
-        scanned_copy = self._copy_to_scanned(source_path, file_hash, source_file)
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO resume_profiles (
+                    client_id, job_id, source_file, source_path, file_hash,
+                    first_name, middle_name, last_name, email, phone, location,
+                    career_summary, skills, total_experience_years,
+                    work_experiences, projects, education, certifications,
+                    domain_expertise, raw_text, extracted_at
+                ) VALUES (
+                    %(client_id)s, %(job_id)s, %(source_file)s, %(source_path)s, %(file_hash)s,
+                    %(first_name)s, %(middle_name)s, %(last_name)s, %(email)s, %(phone)s, %(location)s,
+                    %(career_summary)s, %(skills)s, %(total_experience_years)s,
+                    %(work_experiences)s, %(projects)s, %(education)s, %(certifications)s,
+                    %(domain_expertise)s, %(raw_text)s, %(extracted_at)s
+                )
+                ON CONFLICT (client_id, file_hash) DO UPDATE SET
+                    job_id = EXCLUDED.job_id,
+                    source_file = EXCLUDED.source_file,
+                    source_path = EXCLUDED.source_path,
+                    first_name = EXCLUDED.first_name,
+                    middle_name = EXCLUDED.middle_name,
+                    last_name = EXCLUDED.last_name,
+                    email = EXCLUDED.email,
+                    phone = EXCLUDED.phone,
+                    location = EXCLUDED.location,
+                    career_summary = EXCLUDED.career_summary,
+                    skills = EXCLUDED.skills,
+                    total_experience_years = EXCLUDED.total_experience_years,
+                    work_experiences = EXCLUDED.work_experiences,
+                    projects = EXCLUDED.projects,
+                    education = EXCLUDED.education,
+                    certifications = EXCLUDED.certifications,
+                    domain_expertise = EXCLUDED.domain_expertise,
+                    raw_text = EXCLUDED.raw_text,
+                    extracted_at = EXCLUDED.extracted_at
+                RETURNING id
+            """, {
+                "client_id": client_id.strip(),
+                "job_id": job_id.strip(),
+                "source_file": source_file,
+                "source_path": source_path,
+                "file_hash": file_hash,
+                "first_name": profile.first_name,
+                "middle_name": profile.middle_name,
+                "last_name": profile.last_name,
+                "email": profile.email,
+                "phone": profile.phone,
+                "location": profile.location,
+                "career_summary": profile.career_summary,
+                "skills": json.dumps(profile.skills),
+                "total_experience_years": profile.total_experience_years,
+                "work_experiences": json.dumps([exp.model_dump() for exp in profile.work_experiences]),
+                "projects": json.dumps([proj.model_dump() for proj in profile.projects]),
+                "education": json.dumps(profile.education),
+                "certifications": json.dumps(profile.certifications),
+                "domain_expertise": json.dumps(profile.domain_expertise),
+                "raw_text": profile.raw_text,
+                "extracted_at": datetime.now().isoformat(),
+            })
+            row = cur.fetchone()
+            row_id = row["id"] if row else 0
 
-        # Serialize complex fields to JSON
-        data = (
-            client_id.strip(),
-            job_id.strip(),
-            source_file,
-            source_path,
-            file_hash,
-            str(scanned_copy) if scanned_copy else None,
-            profile.first_name,
-            profile.middle_name,
-            profile.last_name,
-            profile.email,
-            profile.phone,
-            profile.location,
-            profile.career_summary,
-            json.dumps(profile.skills),
-            profile.total_experience_years,
-            json.dumps([exp.model_dump() for exp in profile.work_experiences]),
-            json.dumps([proj.model_dump() for proj in profile.projects]),
-            json.dumps(profile.education),
-            json.dumps(profile.certifications),
-            json.dumps(profile.domain_expertise),
-            profile.raw_text,
-            datetime.now().isoformat(),
-        )
-
-        cursor = self.conn.execute("""
-            INSERT OR REPLACE INTO resume_profiles (
-                client_id, job_id,
-                source_file, source_path, file_hash, scanned_copy,
-                first_name, middle_name, last_name, email, phone, location,
-                career_summary, skills, total_experience_years,
-                work_experiences, projects, education, certifications,
-                domain_expertise, raw_text, extracted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, data)
         self.conn.commit()
-
-        logger.info(
-            f"Stored profile: {profile.full_name} ({source_file}) "
-            f"→ client={client_id}, job={job_id}, id={cursor.lastrowid}"
-        )
-        return cursor.lastrowid
-
-    def _copy_to_scanned(self, source_path: str, file_hash: str, filename: str) -> Optional[Path]:
-        """Copy the original resume file to scanned_files/ directory."""
-        try:
-            src = Path(source_path)
-            if not src.exists():
-                return None
-            dest = self.scanned_files_path / f"{file_hash[:8]}_{filename}"
-            if not dest.exists():
-                shutil.copy2(str(src), str(dest))
-                logger.debug(f"Copied resume to: {dest}")
-            return dest
-        except Exception as e:
-            logger.warning(f"Failed to copy resume to scanned_files: {e}")
-            return None
+        logger.info(f"Stored profile: {profile.full_name} ({source_file}) → client={client_id}, id={row_id}")
+        return row_id
 
     # ─────────────────────────────────────────────────────────────────────────
     # READ OPERATIONS — ALL FILTERED BY CLIENT_ID (NDA ENFORCEMENT)
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_all_profiles(self, client_id: str) -> list[ResumeProfile]:
-        """
-        Retrieve all stored profiles for a specific client.
-
-        NDA ENFORCEMENT: Only returns profiles belonging to the given client_id.
-
-        Args:
-            client_id: The client whose profiles to retrieve
-
-        Returns:
-            List of ResumeProfile objects (deserialized from DB)
-
-        Raises:
-            ValueError: If client_id is empty
-        """
+        """Retrieve all profiles for a specific client."""
         if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for retrieving profiles (NDA enforcement)")
+            raise ValueError("client_id is required (NDA enforcement)")
 
-        cursor = self.conn.execute(
-            "SELECT * FROM resume_profiles WHERE client_id = ? ORDER BY id",
-            (client_id.strip(),)
-        )
-        rows = cursor.fetchall()
-        profiles = [self._row_to_profile(row) for row in rows]
-        logger.debug(f"Retrieved {len(profiles)} profiles for client={client_id}")
-        return profiles
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM resume_profiles WHERE client_id = %s ORDER BY id",
+                (client_id.strip(),)
+            )
+            rows = cur.fetchall()
+
+        return [self._row_to_profile(row) for row in rows]
 
     def get_all_profiles_with_metadata(self, client_id: str) -> list[dict]:
-        """
-        Retrieve all profiles with source file metadata for a specific client.
-
-        NDA ENFORCEMENT: Only returns profiles belonging to the given client_id.
-
-        Args:
-            client_id: The client whose profiles to retrieve
-
-        Returns:
-            List of dicts with 'profile', 'source_file', 'source_path', 'file_hash', etc.
-
-        Raises:
-            ValueError: If client_id is empty
-        """
+        """Retrieve all profiles with source metadata for a client."""
         if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for retrieving profiles (NDA enforcement)")
+            raise ValueError("client_id is required (NDA enforcement)")
 
-        cursor = self.conn.execute(
-            "SELECT * FROM resume_profiles WHERE client_id = ? ORDER BY id",
-            (client_id.strip(),)
-        )
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            results.append({
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM resume_profiles WHERE client_id = %s ORDER BY id",
+                (client_id.strip(),)
+            )
+            rows = cur.fetchall()
+
+        return [
+            {
                 "profile": self._row_to_profile(row),
                 "source_file": row["source_file"],
                 "source_path": row["source_path"],
                 "file_hash": row["file_hash"],
                 "client_id": row["client_id"],
                 "job_id": row["job_id"],
-                "extracted_at": row["extracted_at"],
-            })
-        return results
+                "extracted_at": str(row["extracted_at"]),
+            }
+            for row in rows
+        ]
 
     def get_profile_count(self, client_id: Optional[str] = None) -> int:
-        """
-        Return number of profiles in the database.
-
-        Args:
-            client_id: If provided, count only for this client.
-                       If None, returns total count across ALL clients (for status display).
-        """
-        if client_id:
-            cursor = self.conn.execute(
-                "SELECT COUNT(*) FROM resume_profiles WHERE client_id = ?",
-                (client_id.strip(),)
-            )
-        else:
-            cursor = self.conn.execute("SELECT COUNT(*) FROM resume_profiles")
-        return cursor.fetchone()[0]
+        """Return profile count. If client_id given, scoped to that client."""
+        with self.conn.cursor() as cur:
+            if client_id:
+                cur.execute(
+                    "SELECT COUNT(*) as cnt FROM resume_profiles WHERE client_id = %s",
+                    (client_id.strip(),)
+                )
+            else:
+                cur.execute("SELECT COUNT(*) as cnt FROM resume_profiles")
+            return cur.fetchone()["cnt"]
 
     def get_ingested_hashes(self, client_id: str) -> set[str]:
-        """
-        Return set of all file hashes already in the database for a client.
-
-        NDA ENFORCEMENT: Only returns hashes belonging to the given client_id.
-
-        Args:
-            client_id: The client to check ingested files for
-
-        Raises:
-            ValueError: If client_id is empty
-        """
+        """Return all file hashes for a client."""
         if not client_id or not client_id.strip():
-            raise ValueError("client_id is required for checking ingested hashes (NDA enforcement)")
+            raise ValueError("client_id is required (NDA enforcement)")
 
-        cursor = self.conn.execute(
-            "SELECT file_hash FROM resume_profiles WHERE client_id = ?",
-            (client_id.strip(),)
-        )
-        return {row[0] for row in cursor.fetchall()}
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT file_hash FROM resume_profiles WHERE client_id = %s",
+                (client_id.strip(),)
+            )
+            return {row["file_hash"] for row in cur.fetchall()}
 
     # ─────────────────────────────────────────────────────────────────────────
     # FILE CHANGE DETECTION
     # ─────────────────────────────────────────────────────────────────────────
 
     def needs_processing(self, file_path: str | Path, client_id: str) -> bool:
-        """
-        Check if a file needs to be (re-)processed for a specific client.
-
-        Returns True if:
-            - File hash not in database for this client (new file)
-            - File content has changed (hash mismatch)
-
-        Note: The same file CAN exist under different clients (separate ingest).
-
-        Args:
-            file_path: Path to the resume file to check
-            client_id: The client context for this check
-
-        Returns:
-            True if the file should be processed, False if already in DB for this client
-        """
+        """Check if a file needs processing for a client."""
         file_hash = self.compute_file_hash(file_path)
         ingested = self.get_ingested_hashes(client_id)
-        needs = file_hash not in ingested
-        logger.debug(
-            f"needs_processing({Path(file_path).name}, client={client_id}): "
-            f"hash={file_hash[:8]}... → {needs}"
-        )
-        return needs
+        return file_hash not in ingested
 
     @staticmethod
     def compute_file_hash(file_path: str | Path) -> str:
@@ -400,47 +332,41 @@ class ProfileDatabase:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
-        """Get database status information including per-client breakdown."""
-        total_count = self.get_profile_count()
-        db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
-        scanned_count = len(list(self.scanned_files_path.glob("*"))) if self.scanned_files_path.exists() else 0
+        """Get database status including per-client breakdown."""
+        total = self.get_profile_count()
 
-        # Per-client breakdown
-        cursor = self.conn.execute(
-            "SELECT client_id, job_id, COUNT(*) as cnt "
-            "FROM resume_profiles GROUP BY client_id, job_id ORDER BY client_id, job_id"
-        )
-        client_job_breakdown = [
-            {"client_id": row[0], "job_id": row[1], "count": row[2]}
-            for row in cursor.fetchall()
-        ]
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT client_id, job_id, COUNT(*) as cnt "
+                "FROM resume_profiles GROUP BY client_id, job_id "
+                "ORDER BY client_id, job_id"
+            )
+            breakdown = [
+                {"client_id": row["client_id"], "job_id": row["job_id"], "count": row["cnt"]}
+                for row in cur.fetchall()
+            ]
 
         return {
-            "db_path": str(self.db_path),
-            "profile_count": total_count,
-            "db_size_mb": round(db_size / (1024 * 1024), 2),
-            "scanned_files_count": scanned_count,
-            "scanned_files_path": str(self.scanned_files_path),
-            "client_job_breakdown": client_job_breakdown,
+            "db_type": "PostgreSQL + pgvector",
+            "profile_count": total,
+            "client_job_breakdown": breakdown,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
-    # INTERNAL: Row → ResumeProfile conversion
+    # INTERNAL
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _row_to_profile(self, row: sqlite3.Row) -> ResumeProfile:
-        """Convert a database row to a ResumeProfile object."""
-        # Deserialize work experiences
-        work_exps_raw = json.loads(row["work_experiences"] or "[]")
-        work_experiences = [
-            WorkExperience(**exp) for exp in work_exps_raw if isinstance(exp, dict)
-        ]
+    def _row_to_profile(self, row: dict) -> ResumeProfile:
+        """Convert a database row dict to a ResumeProfile object."""
+        skills = row["skills"] if isinstance(row["skills"], list) else json.loads(row["skills"] or "[]")
+        work_exps_raw = row["work_experiences"] if isinstance(row["work_experiences"], list) else json.loads(row["work_experiences"] or "[]")
+        projects_raw = row["projects"] if isinstance(row["projects"], list) else json.loads(row["projects"] or "[]")
+        education = row["education"] if isinstance(row["education"], list) else json.loads(row["education"] or "[]")
+        certifications = row["certifications"] if isinstance(row["certifications"], list) else json.loads(row["certifications"] or "[]")
+        domain_expertise = row["domain_expertise"] if isinstance(row["domain_expertise"], list) else json.loads(row["domain_expertise"] or "[]")
 
-        # Deserialize projects
-        projects_raw = json.loads(row["projects"] or "[]")
-        projects = [
-            Project(**proj) for proj in projects_raw if isinstance(proj, dict)
-        ]
+        work_experiences = [WorkExperience(**exp) for exp in work_exps_raw if isinstance(exp, dict)]
+        projects = [Project(**proj) for proj in projects_raw if isinstance(proj, dict)]
 
         return ResumeProfile(
             client_id=row["client_id"],
@@ -452,17 +378,17 @@ class ProfileDatabase:
             phone=row["phone"],
             location=row["location"],
             career_summary=row["career_summary"] or "",
-            skills=json.loads(row["skills"] or "[]"),
+            skills=skills,
             total_experience_years=row["total_experience_years"],
             work_experiences=work_experiences,
             projects=projects,
-            education=json.loads(row["education"] or "[]"),
-            certifications=json.loads(row["certifications"] or "[]"),
-            domain_expertise=json.loads(row["domain_expertise"] or "[]"),
+            education=education,
+            certifications=certifications,
+            domain_expertise=domain_expertise,
             raw_text=row["raw_text"] or "",
         )
 
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()
-        logger.debug("Database connection closed")
+        logger.debug("PostgreSQL connection closed")

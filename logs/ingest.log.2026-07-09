@@ -1,0 +1,187 @@
+2026-07-09 14:31:34 | INFO    | __main__ | Logging initialized: mode=ingest, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/ingest.log, level=INFO
+2026-07-09 14:31:34 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 14:31:34 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 14:31:39 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 14:31:39 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 14:31:41 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 14:31:41 | INFO    | matching_engine.scanner | Scanner found 5 resume files in resumes
+2026-07-09 14:31:41 | INFO    | matching_engine.scanner | Scanner: 5 new files to process for client=ACME_CORP, job=JOB-001. 0 already in DB.
+2026-07-09 14:31:41 | INFO    | matching_engine.scanner | Ingesting [1/5]: Arun Prasad Resume.pdf
+2026-07-09 14:31:41 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 14:32:07 | INFO    | matching_engine.resume_understanding | Chunked extraction triggered: have 2 entries, estimated 11 in text. Extracting experience section...
+2026-07-09 14:32:22 | WARNING | matching_engine.hallucination_check | Hallucination check FAILED (confidence=24%): skills: only 0/5 items found in source text (suspect: Microservices Development: Java - Spring - Docker - ElasticSearch - Kafka - AWS Services - Angular - Ag-grid - SQL (Oracle, MySQL) - NoSQL (MongoDB) - Netflix OSS - DevOps practices - Continuous Integration, Data Science: Python - Pandas - NumPy - Matplotlib - Scikit-learn, Architectural Skills: Solution Design - Microservices - Event-Driven Architecture - Database Design, Product Management: Design thinking - Product Strategy - Requirement Gathering and Prioritization - UX Design, Technology Leadership: Strategic Vision & Planning - Effective Communication - Decision-Making - Adaptability - Value Stream Mapping - Continuous Improvement - Cross-Functional Collaboration - Agile Development Processes); companies: only 0/2 items found in source text (suspect: Operative, MetricStream); experience_years: only 0/1 items found in source text (suspect: Claimed 17.0yrs but work history spans ~8yrs)
+2026-07-09 14:32:22 | WARNING | matching_engine.scanner |   ⚠️  Hallucination detected for Arun Prasad Resume.pdf (confidence=24%)
+2026-07-09 14:32:22 | WARNING | matching_engine.scanner |       skills: only 0/5 items found in source text (suspect: Microservices Development: Java - Spring - Docker - ElasticSearch - Kafka - AWS Services - Angular - Ag-grid - SQL (Oracle, MySQL) - NoSQL (MongoDB) - Netflix OSS - DevOps practices - Continuous Integration, Data Science: Python - Pandas - NumPy - Matplotlib - Scikit-learn, Architectural Skills: Solution Design - Microservices - Event-Driven Architecture - Database Design, Product Management: Design thinking - Product Strategy - Requirement Gathering and Prioritization - UX Design, Technology Leadership: Strategic Vision & Planning - Effective Communication - Decision-Making - Adaptability - Value Stream Mapping - Continuous Improvement - Cross-Functional Collaboration - Agile Development Processes)
+2026-07-09 14:32:22 | WARNING | matching_engine.scanner |       companies: only 0/2 items found in source text (suspect: Operative, MetricStream)
+2026-07-09 14:32:22 | WARNING | matching_engine.scanner |       experience_years: only 0/1 items found in source text (suspect: Claimed 17.0yrs but work history spans ~8yrs)
+2026-07-09 14:32:22 | INFO    | matching_engine.database | Stored profile: Arun Prasad Sridharan (Arun Prasad Resume.pdf) → client=ACME_CORP, job=JOB-001, id=1
+2026-07-09 14:33:00 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 14:33:10 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 14:33:10 | INFO    | matching_engine.scanner |   ✓ Ingested: Arun Prasad Sridharan (Arun Prasad Resume.pdf)
+2026-07-09 14:33:10 | INFO    | matching_engine.scanner | Ingesting [2/5]: DevSecOps_MLOps_v3.docx
+2026-07-09 14:33:10 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 14:33:54 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 14:33:54 | INFO    | matching_engine.database | Stored profile: Kumar S Karpuram (DevSecOps_MLOps_v3.docx) → client=ACME_CORP, job=JOB-001, id=2
+2026-07-09 14:33:55 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S Karpuram (DevSecOps_MLOps_v3.docx)
+2026-07-09 14:33:55 | INFO    | matching_engine.scanner | Ingesting [3/5]: Jyothi Kancharla.docx
+2026-07-09 14:33:55 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 14:34:39 | INFO    | matching_engine.resume_understanding | Chunked extraction triggered: have 5 entries, estimated 6 in text. Extracting experience section...
+2026-07-09 14:34:54 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (75%)
+2026-07-09 14:34:54 | INFO    | matching_engine.database | Stored profile: Jyothi Kancharla (Jyothi Kancharla.docx) → client=ACME_CORP, job=JOB-001, id=3
+2026-07-09 14:34:54 | INFO    | matching_engine.scanner |   ✓ Ingested: Jyothi Kancharla (Jyothi Kancharla.docx)
+2026-07-09 14:34:54 | INFO    | matching_engine.scanner | Ingesting [4/5]: Kumar_DevSecOps_MLOps_v1.pdf
+2026-07-09 14:34:55 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 14:35:39 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (96%)
+2026-07-09 14:35:39 | INFO    | matching_engine.database | Stored profile: Kumar S Karpuram (Kumar_DevSecOps_MLOps_v1.pdf) → client=ACME_CORP, job=JOB-001, id=4
+2026-07-09 14:35:40 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S Karpuram (Kumar_DevSecOps_MLOps_v1.pdf)
+2026-07-09 14:35:40 | INFO    | matching_engine.scanner | Ingesting [5/5]: Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx
+2026-07-09 14:35:40 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 14:36:24 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 14:36:24 | INFO    | matching_engine.database | Stored profile: Kumar S K (Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx) → client=ACME_CORP, job=JOB-001, id=5
+2026-07-09 14:36:25 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S K (Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx)
+2026-07-09 14:36:25 | INFO    | matching_engine.scanner | Scanner complete: 5 new, 0 skipped, 0 failed. Total in DB for client=ACME_CORP: 5. Time: 283.5s
+2026-07-09 15:44:00 | INFO    | __main__ | Logging initialized: mode=ingest, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/ingest.log, level=INFO
+2026-07-09 15:44:00 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 15:44:00 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 15:44:04 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 15:44:04 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 15:44:07 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 15:44:07 | INFO    | matching_engine.scanner | Scanner found 5 resume files in resumes
+2026-07-09 15:44:07 | INFO    | matching_engine.scanner | Scanner: 5 new files to process for client=ACME_CORP, job=JOB-001. 0 already in DB.
+2026-07-09 15:44:07 | INFO    | matching_engine.scanner | Ingesting [1/5]: Arun Prasad Resume.pdf
+2026-07-09 15:44:07 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 15:44:34 | INFO    | matching_engine.resume_understanding | Chunked extraction triggered: have 2 entries, estimated 11 in text. Extracting experience section...
+2026-07-09 15:44:55 | WARNING | matching_engine.hallucination_check | Hallucination check FAILED (confidence=36%): skills: only 2/5 items found in source text (suspect: Data Science: Python - Pandas - NumPy - Matplotlib - Scikit-learn, Architectural Skills: Solution Design - Microservices - Event-Driven Architecture - Database Design, Product Management: Design thinking - Product Strategy - Requirement Gathering and Prioritization - UX Design); companies: only 0/2 items found in source text (suspect: Operative, MetricStream); experience_years: only 0/1 items found in source text (suspect: Claimed 17.0yrs but work history spans ~8yrs)
+2026-07-09 15:44:55 | WARNING | matching_engine.scanner |   ⚠️  Hallucination detected for Arun Prasad Resume.pdf (confidence=36%)
+2026-07-09 15:44:55 | WARNING | matching_engine.scanner |       skills: only 2/5 items found in source text (suspect: Data Science: Python - Pandas - NumPy - Matplotlib - Scikit-learn, Architectural Skills: Solution Design - Microservices - Event-Driven Architecture - Database Design, Product Management: Design thinking - Product Strategy - Requirement Gathering and Prioritization - UX Design)
+2026-07-09 15:44:55 | WARNING | matching_engine.scanner |       companies: only 0/2 items found in source text (suspect: Operative, MetricStream)
+2026-07-09 15:44:55 | WARNING | matching_engine.scanner |       experience_years: only 0/1 items found in source text (suspect: Claimed 17.0yrs but work history spans ~8yrs)
+2026-07-09 15:44:55 | INFO    | matching_engine.database | Stored profile: Arun Prasad Sridharan (Arun Prasad Resume.pdf) → client=ACME_CORP, job=JOB-001, id=1
+2026-07-09 15:45:35 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 15:45:43 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 15:45:44 | INFO    | matching_engine.scanner |   ✓ Ingested: Arun Prasad Sridharan (Arun Prasad Resume.pdf)
+2026-07-09 15:45:44 | INFO    | matching_engine.scanner | Ingesting [2/5]: DevSecOps_MLOps_v3.docx
+2026-07-09 15:45:44 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 15:46:14 | WARNING | matching_engine.resume_understanding | JSON extraction failed (attempt 1), retrying...
+2026-07-09 15:46:55 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 15:46:55 | INFO    | matching_engine.database | Stored profile: Kumar S Karpuram (DevSecOps_MLOps_v3.docx) → client=ACME_CORP, job=JOB-001, id=2
+2026-07-09 15:46:55 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S Karpuram (DevSecOps_MLOps_v3.docx)
+2026-07-09 15:46:55 | INFO    | matching_engine.scanner | Ingesting [3/5]: Jyothi Kancharla.docx
+2026-07-09 15:46:55 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 15:47:36 | WARNING | matching_engine.resume_understanding | JSON extraction failed (attempt 1), retrying...
+2026-07-09 15:48:13 | WARNING | matching_engine.resume_understanding | JSON extraction failed (attempt 2), retrying...
+2026-07-09 15:48:53 | INFO    | matching_engine.resume_understanding | Chunked extraction triggered: have 5 entries, estimated 6 in text. Extracting experience section...
+2026-07-09 15:49:10 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 15:49:10 | INFO    | matching_engine.database | Stored profile: Jyothi Kancharla (Jyothi Kancharla.docx) → client=ACME_CORP, job=JOB-001, id=3
+2026-07-09 15:49:11 | INFO    | matching_engine.scanner |   ✓ Ingested: Jyothi Kancharla (Jyothi Kancharla.docx)
+2026-07-09 15:49:11 | INFO    | matching_engine.scanner | Ingesting [4/5]: Kumar_DevSecOps_MLOps_v1.pdf
+2026-07-09 15:49:11 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 15:50:29 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 15:50:29 | INFO    | matching_engine.database | Stored profile: Kumar S Karpuram (Kumar_DevSecOps_MLOps_v1.pdf) → client=ACME_CORP, job=JOB-001, id=4
+2026-07-09 15:50:30 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S Karpuram (Kumar_DevSecOps_MLOps_v1.pdf)
+2026-07-09 15:50:30 | INFO    | matching_engine.scanner | Ingesting [5/5]: Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx
+2026-07-09 15:50:30 | INFO    | matching_engine.resume_understanding | Stage 2: Extracting resume information
+2026-07-09 15:51:39 | INFO    | matching_engine.scanner |     ✓ Grounding check passed (100%)
+2026-07-09 15:51:39 | INFO    | matching_engine.database | Stored profile: Kumar S K (Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx) → client=ACME_CORP, job=JOB-001, id=5
+2026-07-09 15:51:41 | INFO    | matching_engine.scanner |   ✓ Ingested: Kumar S K (Resume_Sr.Engineering_Specialist(SRE,DevOps&QA).docx)
+2026-07-09 15:51:41 | INFO    | matching_engine.scanner | Scanner complete: 5 new, 0 skipped, 0 failed. Total in DB for client=ACME_CORP: 5. Time: 453.8s
+2026-07-09 17:08:32 | INFO    | __main__ | Logging initialized: mode=ingest, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/ingest.log, level=INFO
+2026-07-09 17:08:32 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 17:08:32 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 17:08:36 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 17:08:51 | INFO    | matching_engine.file_loader | Loaded: ( TWC ) Lead MLOps Engineer.pdf (5689 chars)
+2026-07-09 17:08:51 | INFO    | matching_engine.file_loader | Loaded 1 files from jd
+2026-07-09 17:08:51 | INFO    | __main__ | Using JD: ( TWC ) Lead MLOps Engineer.pdf
+2026-07-09 17:08:51 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 17:08:54 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 17:08:54 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-09 17:09:39 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 17:09:46 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 17:09:54 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-09 17:09:54 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-09 17:09:54 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-09 17:09:56 | INFO    | matching_engine.knowledge_graph | SkillGraph initialized: 148 skills, 158 relationships
+2026-07-09 17:09:56 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:09:56 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:09:56 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-09 17:09:56 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-09 17:09:56 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:09:56 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:09:56 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-09 17:09:56 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-09 17:09:56 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-09 17:10:02 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-09 17:10:10 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:10:14 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:10:20 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-09 17:15:39 | INFO    | __main__ | Logging initialized: mode=ingest, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/ingest.log, level=INFO
+2026-07-09 17:15:39 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 17:15:39 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 17:15:41 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 17:15:41 | INFO    | matching_engine.file_loader | Loaded: Forward Deployed Engineer.docx (3111 chars)
+2026-07-09 17:15:41 | INFO    | matching_engine.file_loader | Loaded 1 files from jd
+2026-07-09 17:15:41 | INFO    | __main__ | Using JD: Forward Deployed Engineer.docx
+2026-07-09 17:15:41 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 17:15:43 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 17:15:43 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-09 17:15:58 | ERROR   | matching_engine.jd_understanding | JD extraction failed: 4 validation errors for JobDescription
+responsibilities.0
+  Input should be a valid string [type=string_type, input_value={'name': "Build data solu...core systems of record"}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+responsibilities.1
+  Input should be a valid string [type=string_type, input_value={'name': 'Help ground dat...t accuracy and quality'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+responsibilities.2
+  Input should be a valid string [type=string_type, input_value={'name': 'Operate in the ...e in live environments'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+responsibilities.3
+  Input should be a valid string [type=string_type, input_value={'name': 'Codify reusable... zero to value rapidly'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+2026-07-09 17:15:58 | INFO    | matching_engine.jd_understanding | Using fallback keyword extraction for JD
+2026-07-09 17:16:34 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 17:16:43 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 17:16:52 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-09 17:16:52 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-09 17:16:52 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-09 17:16:52 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:16:52 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:16:52 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-09 17:16:53 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-09 17:16:53 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:16:53 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:16:53 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-09 17:16:53 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-09 17:16:53 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-09 17:16:59 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:17:06 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-09 17:17:10 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:17:17 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-09 17:39:29 | INFO    | __main__ | Logging initialized: mode=ingest, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/ingest.log, level=INFO
+2026-07-09 17:39:29 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 17:39:29 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 17:39:31 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 17:39:31 | INFO    | matching_engine.file_loader | Loaded: Forward Deployed Engineer.docx (3111 chars)
+2026-07-09 17:39:31 | INFO    | matching_engine.file_loader | Loaded 1 files from jd
+2026-07-09 17:39:31 | INFO    | __main__ | Using JD: Forward Deployed Engineer.docx
+2026-07-09 17:39:31 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 17:39:33 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 17:39:33 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-09 17:40:15 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 17:40:24 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 17:40:32 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-09 17:40:32 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-09 17:40:33 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-09 17:40:34 | INFO    | matching_engine.knowledge_graph | SkillGraph initialized: 148 skills, 158 relationships
+2026-07-09 17:40:34 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:40:34 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:40:34 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-09 17:40:34 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-09 17:40:34 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:40:34 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:40:34 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-09 17:40:34 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-09 17:40:34 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-09 17:40:41 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-09 17:40:47 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-09 17:40:54 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:41:00 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram

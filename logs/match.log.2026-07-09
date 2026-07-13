@@ -1,0 +1,58 @@
+2026-07-09 17:57:12 | INFO    | __main__ | Logging initialized: mode=match, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/match.log, level=INFO
+2026-07-09 17:57:12 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 17:57:12 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 17:57:14 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 17:57:14 | INFO    | matching_engine.file_loader | Loaded: Forward Deployed Engineer.docx (3111 chars)
+2026-07-09 17:57:14 | INFO    | matching_engine.file_loader | Loaded 1 files from jd
+2026-07-09 17:57:14 | INFO    | __main__ | Using JD: Forward Deployed Engineer.docx
+2026-07-09 17:57:14 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 17:57:17 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 17:57:17 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-09 17:58:12 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 17:58:21 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 17:58:29 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-09 17:58:29 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-09 17:58:30 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-09 17:58:31 | INFO    | matching_engine.knowledge_graph | SkillGraph initialized: 148 skills, 158 relationships
+2026-07-09 17:58:31 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:58:31 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:58:31 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-09 17:58:32 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-09 17:58:32 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 17:58:32 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 17:58:32 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-09 17:58:32 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-09 17:58:32 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-09 17:58:39 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-09 17:58:44 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-09 17:58:53 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 17:59:02 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 18:01:13 | INFO    | __main__ | Logging initialized: mode=match, file=/Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/logs/match.log, level=INFO
+2026-07-09 18:01:13 | INFO    | __main__ | Config loaded from: /Users/kumarsk.k/Library/CloudStorage/OneDrive-BTPlc/BT/GitHub/AI-Resume-Matcher/config.yaml
+2026-07-09 18:01:13 | INFO    | __main__ | Primary model: ollama/llama3 | Failover: none
+2026-07-09 18:01:14 | INFO    | __main__ | Ollama model 'llama3' warmed up, keep_alive=30m
+2026-07-09 18:01:14 | INFO    | matching_engine.file_loader | Loaded: Forward Deployed Engineer.docx (3111 chars)
+2026-07-09 18:01:14 | INFO    | matching_engine.file_loader | Loaded 1 files from jd
+2026-07-09 18:01:14 | INFO    | __main__ | Using JD: Forward Deployed Engineer.docx
+2026-07-09 18:01:14 | INFO    | matching_engine.database | ProfileDatabase initialized: data/profiles.db
+2026-07-09 18:01:16 | INFO    | matching_engine.vector_store | VectorStore initialized: data/chroma (skills=0, experience=0, summary=0, total=0)
+2026-07-09 18:01:16 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-09 18:01:58 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-09 18:02:10 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-09 18:02:22 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-09 18:02:22 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-09 18:02:22 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-09 18:02:23 | INFO    | matching_engine.knowledge_graph | SkillGraph initialized: 148 skills, 158 relationships
+2026-07-09 18:02:23 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 18:02:23 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 18:02:23 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-09 18:02:24 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-09 18:02:24 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-09 18:02:24 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-09 18:02:24 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-09 18:02:24 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-09 18:02:24 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-09 18:02:31 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-09 18:02:37 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-09 18:02:43 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-09 18:02:49 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram

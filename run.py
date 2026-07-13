@@ -1053,8 +1053,8 @@ def _validate_tenant_flags(args, mode: str = "ingest") -> None:
 
 def _show_db_status(args) -> None:
     """Display database and vector store status, then exit."""
-    db = ProfileDatabase(args.db_path, args.scanned_files_path)
-    vs = VectorStore(args.vector_store_path)
+    db = ProfileDatabase()
+    vs = VectorStore()
 
     db_status = db.get_status()
     vs_status = vs.get_status()
@@ -1082,8 +1082,8 @@ async def _run_ingest(args) -> None:
     print(f"  Job ID:    {args.job_id}")
     print("=" * 50)
 
-    db = ProfileDatabase(args.db_path, args.scanned_files_path)
-    vs = VectorStore(args.vector_store_path)
+    db = ProfileDatabase()
+    vs = VectorStore()
 
     result = await scan_and_ingest(
         resumes_dir=args.resumes,
@@ -1127,8 +1127,8 @@ async def _run_match_from_db(args) -> None:
     print(f"  JD loaded: {len(jd_text)} characters")
 
     # ── Load profiles from DB ─────────────────────────────────────────────────
-    db = ProfileDatabase(args.db_path, args.scanned_files_path)
-    vs = VectorStore(args.vector_store_path)
+    db = ProfileDatabase()
+    vs = VectorStore()
 
     profile_count = db.get_profile_count()
     if profile_count == 0:
@@ -1242,8 +1242,8 @@ async def _run_ingest_and_match(args) -> None:
     Combined mode: Ingest new files, then match all from DB (--ingest --match or default db_first).
     """
     # First ingest any new files
-    db = ProfileDatabase(args.db_path, args.scanned_files_path)
-    vs = VectorStore(args.vector_store_path)
+    db = ProfileDatabase()
+    vs = VectorStore()
 
     print("\n  Checking for new resumes to ingest...")
     result = await scan_and_ingest(

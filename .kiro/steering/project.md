@@ -2,11 +2,23 @@
 
 ## Overview
 
-Python-based AI-powered resume-to-JD matching engine with a 6-stage pipeline. Supports persistent database storage (SQLite + ChromaDB) with multi-tenant client isolation (NDA enforcement), multi-field embeddings, hybrid search (BM25 + vector), hallucination detection, and scoring evaluation.
+Python-based AI-powered resume-to-JD matching engine with a 6-stage pipeline. Production-grade system with PostgreSQL + pgvector, multi-tenant client isolation (NDA enforcement), multi-field embeddings, hybrid search (vector + full-text), hallucination detection, scoring evaluation, and a FastAPI REST server for UI integration.
 
 ## Architecture
 
-Two-phase architecture: **Ingest** (one-time LLM extraction) and **Match** (fast scoring from DB).
+```
+┌─────────────────────────┐         REST API          ┌─────────────────────────────┐
+│      UI SERVER          │ ──────────────────────────▶│        AI SERVER            │
+│                         │                            │                             │
+│  - Portal/Dashboard     │  POST /api/ingest          │  - LLM (Ollama/Cloud)       │
+│  - 5M resumes in its DB │  POST /api/match           │  - PostgreSQL + pgvector    │
+│  - User uploads JDs     │  GET  /api/status          │  - FastAPI server           │
+│  - Shows results        │◀──────────────────────────│  - Matching pipeline        │
+│                         │         JSON responses     │                             │
+└─────────────────────────┘                            └─────────────────────────────┘
+```
+
+Two-phase processing: **Ingest** (one-time LLM extraction) and **Match** (fast scoring from DB).
 
 ### Pipeline Stages
 
@@ -21,190 +33,262 @@ Two-phase architecture: **Ingest** (one-time LLM extraction) and **Match** (fast
 
 ### Key Modules
 
-- `run.py` — CLI entry point, orchestrates the full flow
-- `matching_engine/pipeline.py` — Pipeline orchestrator (async, concurrent stages)
-- `matching_engine/models.py` — Pydantic data models (all structured data)
-- `matching_engine/llm_client.py` — LiteLLM wrapper with failover + token estimation
-- `matching_engine/database.py` — SQLite profile storage (client-scoped)
-- `matching_engine/vector_store.py` — ChromaDB multi-field embeddings + hybrid search
-- `matching_engine/scanner.py` — File scanner with TF-IDF keyword extraction + hallucination checks
-- `matching_engine/hallucination_check.py` — Grounding verification (LLM output vs source text)
+- `run.py` — CLI entry point
+- `api/server.py` — FastAPI REST server (production entry point)
+- `api/auth.py` — API key authentication
+- `api/tasks.py` — Async task manager for batch ingest
+- `matching_engine/pipeline.py` — Pipeline orchestrator
+- `matching_engine/models.py` — Pydantic data models
+- `matching_engine/database.py` — PostgreSQL profile storage (client-scoped)
+- `matching_engine/vector_store.py` — pgvector multi-field embeddings + hybrid search
+- `matching_engine/scanner.py` — File scanner with TF-IDF + hallucination checks
+- `matching_engine/hallucination_check.py` — Grounding verification
 - `matching_engine/evaluation.py` — Scoring validation + bias detection
-- `matching_engine/file_loader.py` — Text extraction (PDF/DOCX/TXT, OCR, text boxes)
 
 ## Technology Stack
 
 - **Language:** Python 3.10+
 - **Data models:** Pydantic v2
-- **LLM interface:** LiteLLM (supports Ollama, OpenAI, Anthropic, AWS Bedrock)
-- **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`)
-- **Vector store:** ChromaDB (3 collections: skills, experience, summary)
-- **Search:** Hybrid — BM25 lexical + vector semantic with Reciprocal Rank Fusion
-- **Database:** SQLite (profiles with client_id/job_id)
-- **Graph:** NetworkX (knowledge graph)
+- **LLM interface:** LiteLLM (Ollama, OpenAI, Anthropic, AWS Bedrock)
+- **Embeddings:** sentence-transformers (`all-MiniLM-L6-v2`, 384-dim)
+- **Database:** PostgreSQL 16 + pgvector extension (single container)
+- **Vector search:** pgvector HNSW index (cosine similarity)
+- **Full-text search:** PostgreSQL tsvector + ts_rank (replaces BM25)
+- **Hybrid search:** 65% vector RRF + 35% full-text, fused scoring
+- **API server:** FastAPI + uvicorn
+- **Auth:** API key via X-API-Key header
+- **Container:** Docker (pgvector/pgvector:pg16 image)
 - **File parsing:** PyPDF2, pdfplumber, python-docx
 - **Config:** YAML (PyYAML)
 - **Async:** asyncio for concurrent processing
 - **Logging:** TimedRotatingFileHandler (daily rollover, 30-day retention)
 
+## Database (PostgreSQL + pgvector)
+
+Single Docker container runs both structured storage and vector search.
+
+### Tables
+
+**resume_profiles** — Structured candidate data (JSONB fields for skills, work history, etc.)
+```sql
+CREATE TABLE resume_profiles (
+    id SERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    source_file TEXT, first_name TEXT, last_name TEXT, email TEXT, phone TEXT,
+    skills JSONB, total_experience_years REAL, work_experiences JSONB,
+    education JSONB, certifications JSONB, domain_expertise JSONB,
+    raw_text TEXT, extracted_at TIMESTAMPTZ,
+    UNIQUE(client_id, file_hash)
+);
+```
+
+**resume_embeddings** — Multi-field vector embeddings (3 rows per resume)
+```sql
+CREATE TABLE resume_embeddings (
+    id SERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    field_type TEXT NOT NULL,  -- 'skills', 'experience', 'summary'
+    content TEXT,
+    embedding VECTOR(384),
+    metadata JSONB,
+    UNIQUE(client_id, file_hash, field_type)
+);
+-- HNSW index for fast ANN search
+CREATE INDEX idx_embeddings_hnsw ON resume_embeddings USING hnsw (embedding vector_cosine_ops);
+-- GIN index for full-text search
+CREATE INDEX idx_embeddings_fts ON resume_embeddings USING gin (to_tsvector('english', content));
+```
+
+### Connection
+
+Default: `postgresql://matcher:matcher_secret@localhost:5432/resume_matcher`
+Override via `DATABASE_URL` environment variable.
+
 ## Multi-Tenant Isolation (NDA Enforcement)
 
-### Rules
+1. Every profile and embedding is tagged with `client_id`
+2. `--client-id` and `--job-id` are mandatory for `--ingest` and `--match`
+3. All SQL queries include `WHERE client_id = %s`
+4. Vector search includes `WHERE client_id = %s` filter
+5. Within same client, resumes are shared across job_ids freely
+6. Violation = NDA breach — never bypass client_id checks
 
-1. Every profile is tagged with `client_id` and `job_id` at ingest time
-2. `--client-id` and `--job-id` CLI flags are REQUIRED for `--ingest` and `--match`
-3. DB queries ALWAYS filter by `client_id`
-4. ChromaDB queries use `where={"client_id": ...}` filter
-5. SQLite uses `UNIQUE(client_id, file_hash)` constraint
-6. Within same client, resumes are shared across job_ids freely
+## API Server
+
+### Authentication
+
+API key passed via `X-API-Key` header. Keys set via `AI_MATCHER_API_KEYS` env var (comma-separated).
+
+Generate a key: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+### Endpoints
+
+| Method | Endpoint | Auth | Purpose |
+|--------|----------|------|---------|
+| `POST` | `/api/ingest` | Yes | Upload batch of resumes (async) |
+| `GET` | `/api/ingest/{task_id}` | Yes | Poll ingest task status |
+| `POST` | `/api/match` | Yes | Match JD against stored profiles |
+| `GET` | `/api/status` | Yes | DB stats for a client |
+| `GET` | `/health` | No | Health check |
+
+### Ingest Flow (API)
+
+```
+UI sends POST /api/ingest (files + client_id + job_id)
+    → Files saved to data/uploads/{client_id}/{job_id}/
+    → Returns task_id immediately (202 Accepted)
+    → Background: scan_and_ingest() processes files
+    → UI polls GET /api/ingest/{task_id} until completed
+```
 
 ## Embedding Strategy (Multi-Field)
 
-Three separate ChromaDB collections per resume:
-- `resume_skills` — Technologies, tools, certifications (weight: 0.45)
-- `resume_experience` — Role titles, companies, domains (weight: 0.35)
-- `resume_summary` — Career summary, achievements (weight: 0.20)
+Three rows per resume in `resume_embeddings`:
+- `skills` — Technologies, tools, certifications (weight: 0.45)
+- `experience` — Role titles, companies, domains (weight: 0.35)
+- `summary` — Career summary, achievements (weight: 0.20)
 
-Before embedding, TF-IDF keyword extraction removes generic filler words and keeps domain-specific terms.
+TF-IDF keyword extraction removes generic filler before embedding.
 
 ## Hybrid Search
 
 At query time:
-1. JD text is embedded and queried against all 3 collections (vector search)
-2. BM25 lexical scoring runs against stored documents (exact keyword matching)
-3. Results are fused: 65% vector RRF + 35% BM25
-4. Top-N candidates returned for full scoring
+1. JD embedded → cosine similarity search per field type (pgvector HNSW)
+2. Full-text search via PostgreSQL `ts_rank` + `plainto_tsquery`
+3. Fusion: 65% vector (Reciprocal Rank Fusion across 3 fields) + 35% full-text
+4. Top-N candidates returned for scoring
 
 ## Hallucination Detection
 
-After LLM extraction, `check_hallucination()` verifies:
-- Skills: split compound strings, check sub-terms individually (>50% threshold)
-- Companies: lenient matching with suffix stripping (Inc, Ltd, etc.)
-- Certifications: fuzzy match with aliases (k8s↔kubernetes, AWS↔Amazon Web Services)
-- Experience years: cross-check claimed years vs work history date span
-- Name: verify name parts appear in source text
-
-Reports confidence score (0-1). Flags unreliable extractions but does not block storage.
+After LLM extraction, verifies against source text:
+- Skills: compound strings split, >50% sub-terms must be found
+- Companies: lenient matching with suffix stripping
+- Certifications: fuzzy match with tech aliases
+- Experience years: cross-check vs work history dates
+- Name: verify in source text
 
 ## Evaluation Framework
 
-After matching, `generate_evaluation_report()` checks:
-- **Ranking stability:** Perturb weights ±10%, check if top-3 changes
-- **Score distribution:** Detect all-same, too-narrow, ceiling/floor effects
-- **Calibration bands:** Strong/Good/Partial/Weak fit distribution
-- **Bias detection:** Experience over-weighting, skill-count correlation
-- **Keyword stuffing:** High must_have match but low skills_depth = suspect
+After matching:
+- Ranking stability (weight perturbation ±10%)
+- Score distribution analysis
+- Calibration bands (Strong/Good/Partial/Weak)
+- Bias detection (experience/skill-count correlation)
+- Keyword stuffing detection
 
 ## Logging
 
-- Two log files: `logs/ingest.log` and `logs/match.log`
+- `logs/ingest.log` and `logs/match.log`
 - Daily rollover at midnight, 30-day retention
-- All console output (logger + print) captured in log files
-- Format: `2026-07-09 14:32:07 | INFO | module_name | message`
-
-## Coding Standards
-
-### Style & Patterns
-
-- Use **type hints** on all function signatures
-- Use **Pydantic BaseModel** for all structured data (not raw dicts)
-- Use **async/await** for I/O-bound operations (LLM calls, file I/O)
-- All modules have docstrings explaining purpose and call relationships
-- Use `logging` module for internal state; `print()` for user-facing CLI output
-- Configuration priority: CLI flags > config.yaml > built-in defaults
-
-### Error Handling
-
-- LLM calls: retry 3x with exponential backoff, then failover to backup model
-- File extraction: fallback from PDF to pdfplumber to OCR; regex baseline for contact info
-- JSON parsing from LLM: strip markdown fences, normalize dicts-to-strings, attempt repair
-- Never crash the pipeline on a single resume failure; log and continue
-
-### Data Flow
-
-All inter-stage communication uses models from `matching_engine/models.py`:
-- `JobDescription` — Stage 1 output (includes `client_id`, `job_id`)
-- `ResumeProfile` — Stage 2 output (includes `client_id`, `job_id`)
-- `SemanticMatchResult` — Stage 3 output
-- `ScoringBreakdown` — Stage 4 output
-- `ExplainabilityReport` — Stage 5 output
-- `MatchResult` — Final combined result per candidate
+- All output (logger + print) captured
+- Format: `2026-07-12 23:30:48 | INFO | module | message`
 
 ## File Organization
 
 ```
 AI-Resume-Matcher/
 ├── run.py                    ← CLI entry point
+├── docker-compose.yml        ← PostgreSQL + pgvector container
 ├── config.yaml               ← Runtime configuration
 ├── requirements.txt          ← Dependencies
-├── resumes/                  ← Input resumes — git-ignored
-├── jd/                       ← Input JD files — git-ignored
-├── template/                 ← DOCX template (read-only)
-├── rendered/                 ← Generated output docs — git-ignored
-├── logs/
-│   ├── ingest.log            ← Ingest logs (daily rollover)
-│   └── match.log             ← Match logs (daily rollover)
-├── data/
-│   ├── profiles.db           ← SQLite (client-scoped profiles)
-│   ├── chroma/               ← ChromaDB (multi-field embeddings)
-│   └── scanned_files/        ← Copies of processed resumes
-└── matching_engine/
-    ├── models.py             ← Pydantic data models
-    ├── database.py           ← SQLite with client isolation
-    ├── vector_store.py       ← Multi-field ChromaDB + hybrid search
-    ├── scanner.py            ← Ingest with TF-IDF + hallucination check
-    ├── hallucination_check.py← Grounding verification
-    ├── evaluation.py         ← Scoring validation + bias detection
-    ├── jd_understanding.py   ← Stage 1
-    ├── resume_understanding.py← Stage 2
-    ├── semantic_matching.py  ← Stage 3
-    ├── scoring.py            ← Stage 4
-    ├── explainability.py     ← Stage 5
-    ├── template_renderer.py  ← Stage 6
-    ├── pipeline.py           ← Pipeline orchestrator
-    ├── llm_client.py         ← LiteLLM wrapper
-    ├── file_loader.py        ← PDF/DOCX/TXT extraction
-    └── utils.py              ← Shared utilities
+├── .env                      ← API keys, DATABASE_URL (git-ignored)
+├── api/
+│   ├── __init__.py
+│   ├── server.py             ← FastAPI endpoints
+│   ├── auth.py               ← API key authentication
+│   └── tasks.py              ← Async task manager
+├── matching_engine/
+│   ├── models.py             ← Pydantic data models
+│   ├── database.py           ← PostgreSQL profile storage
+│   ├── vector_store.py       ← pgvector + hybrid search
+│   ├── scanner.py            ← Ingest with TF-IDF + hallucination
+│   ├── hallucination_check.py
+│   ├── evaluation.py
+│   ├── jd_understanding.py   ← Stage 1
+│   ├── resume_understanding.py ← Stage 2
+│   ├── semantic_matching.py  ← Stage 3
+│   ├── scoring.py            ← Stage 4
+│   ├── explainability.py     ← Stage 5
+│   ├── template_renderer.py  ← Stage 6
+│   ├── pipeline.py
+│   ├── llm_client.py
+│   ├── file_loader.py
+│   └── utils.py
+├── logs/                     ← Daily rolling logs
+├── data/uploads/             ← Files received via API
+├── resumes/                  ← CLI input resumes (git-ignored)
+├── jd/                       ← CLI input JDs (git-ignored)
+└── template/                 ← DOCX template (read-only)
 ```
 
 ## Build & Run
 
+### Prerequisites
+
 ```bash
-# Install dependencies
+# Start PostgreSQL + pgvector
+docker-compose up -d
+
+# Install Python dependencies
 pip install -r requirements.txt
+```
 
-# Ingest resumes for a client
+### CLI Mode (dev/testing)
+
+```bash
 python run.py --ingest --client-id ACME_CORP --job-id JOB-001
-
-# Match against a JD (only that client's resumes visible)
 python run.py --match --client-id ACME_CORP --job-id JOB-001
-
-# Combined ingest + match
-python run.py --client-id ACME_CORP --job-id JOB-001
-
-# Check DB status (per-client breakdown)
 python run.py --db-status
+```
 
-# Bypass DB entirely (stateless mode)
-python run.py --scan-mode folder_only
+### API Mode (production)
+
+```bash
+# Set API key
+export AI_MATCHER_API_KEYS="your-secure-key-here"
+
+# Start server
+uvicorn api.server:app --host 0.0.0.0 --port 8000
+
+# Swagger docs at http://localhost:8000/docs
+```
+
+### Verify Data
+
+```bash
+# Connect to PostgreSQL
+docker exec -it resume_matcher_db psql -U matcher -d resume_matcher
+
+# Check profiles
+SELECT client_id, job_id, COUNT(*) FROM resume_profiles GROUP BY client_id, job_id;
+
+# Check embeddings
+SELECT field_type, COUNT(*) FROM resume_embeddings GROUP BY field_type;
+
+# Test vector search
+SELECT file_hash, 1-(embedding <=> (SELECT embedding FROM resume_embeddings LIMIT 1)) as sim
+FROM resume_embeddings WHERE field_type='skills' ORDER BY sim DESC LIMIT 5;
 ```
 
 ## Important Constraints
 
-- **PII sensitivity:** Never commit resumes, JDs, or `data/` to git
-- **API keys:** Stored in `.env` (git-ignored). Reference by key name, never expose values
+- **NDA isolation:** `--client-id` mandatory. Never bypass.
+- **API auth:** All endpoints (except /health) require X-API-Key header
+- **PII:** Never commit resumes, JDs, or `.env` to git
 - **Scoring weights** must sum to 1.0
-- **Ollama auto-management:** Script auto-starts Ollama and auto-pulls models
-- **SSL/proxy handling:** Patches SSL verification for corporate environments (Zscaler)
-- **Multi-tenant isolation:** `--client-id` mandatory for all DB modes. Never bypass.
-- **Logging:** All output goes to `logs/` with daily rollover
+- **Ollama auto-management:** Script auto-starts and auto-pulls models
+- **SSL/proxy:** Patches SSL for corporate environments (Zscaler)
+- **Database:** Always use parameterized queries (psycopg handles this)
 
-## LLM Prompt Patterns
+## Coding Standards
 
-When modifying LLM prompts:
-- Always request JSON output with a strict schema
-- Include "respond ONLY with valid JSON" instruction
-- Strip markdown code fences from responses before parsing
-- Use `_normalize_string_list()` to handle LLM returning dicts instead of strings
-- Provide fallback/default values if JSON parsing fails
-- Keep temperature low (0.1) for structured extraction
+- Type hints on all function signatures
+- Pydantic BaseModel for all structured data
+- async/await for I/O-bound operations
+- `logging` module for internal state; `print()` for CLI output
+- Config priority: CLI flags > env vars > config.yaml > defaults
+- All DB reads require client_id parameter (enforced with ValueError)
