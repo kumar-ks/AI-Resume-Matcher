@@ -19,5 +19,29 @@ services:
       timeout: 3s
       retries: 5
 
+  api:
+    build: .
+    container_name: resume_matcher_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://matcher:matcher_secret@postgres:5432/resume_matcher"
+      AI_MATCHER_API_KEYS: "${AI_MATCHER_API_KEYS:-dev-key-change-me}"
+      # Ollama connectivity (runs on host machine, accessed from container)
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+      OLLAMA_API_BASE: "http://host.docker.internal:11434"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Logs written outside container (daily rolling, persists across restarts)
+      - ./logs:/app/logs
+      - ./data/uploads:/app/data/uploads
+      - ./resumes:/app/resumes
+      - ./jd:/app/jd
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   pgdata:

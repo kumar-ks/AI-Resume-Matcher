@@ -118,10 +118,28 @@ All endpoints (except `/health`) require an `X-API-Key` header.
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 # Set it (comma-separated for multiple keys)
-export AI_MATCHER_API_KEYS="key1,key2"
+export AI_MATCHER_API_KEYS="xK9m2Fq_7vLpR3nYwT1bHsZcUj8dAeGi0kMoXhNa4E"
+
+# Start server
+uvicorn api.server:app --host 0.0.0.0 --port 8000
 ```
 
 Default dev key: `dev-key-change-me` (used if no env var set).
+
+**Test authentication:**
+
+```bash
+# ✅ Valid key — returns 200
+curl -s http://localhost:8000/api/status \
+  -H "X-API-Key: xK9m2Fq_7vLpR3nYwT1bHsZcUj8dAeGi0kMoXhNa4E"
+
+# ❌ Wrong key — returns 403 Forbidden
+curl -s http://localhost:8000/api/status \
+  -H "X-API-Key: wrong-key-here"
+
+# ❌ No key — returns 401 Unauthorized
+curl -s http://localhost:8000/api/status
+```
 
 ### Endpoints
 
