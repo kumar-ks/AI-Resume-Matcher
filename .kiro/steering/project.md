@@ -129,21 +129,65 @@ Generate a key: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
 
 | Method | Endpoint | Auth | Purpose |
 |--------|----------|------|---------|
-| `POST` | `/api/ingest` | Yes | Upload batch of resumes (async) |
-| `GET` | `/api/ingest/{task_id}` | Yes | Poll ingest task status |
-| `POST` | `/api/match` | Yes | Match JD against stored profiles |
-| `GET` | `/api/status` | Yes | DB stats for a client |
+| `POST` | `/api/ingest` | Yes | Upload resumes + JD, ingest, match, save results (async) |
+| `POST` | `/api/match` | Yes | Upload JD, match existing profiles, save results (async) |
+| `GET` | `/api/status` | Yes | Get unsent results for client_id + job_id |
 | `GET` | `/health` | No | Health check |
 
 ### Ingest Flow (API)
 
 ```
-UI sends POST /api/ingest (files + client_id + job_id)
+UI sends POST /api/ingest (resumes + JD + client_id + job_id)
     → Files saved to data/uploads/{client_id}/{job_id}/
-    → Returns task_id immediately (202 Accepted)
-    → Background: scan_and_ingest() processes files
-    → UI polls GET /api/ingest/{task_id} until completed
+    → Returns 202 immediately
+    → Background: ingests resumes → matches against JD → saves to match_results table
+    → UI calls GET /api/status?client_id=X&job_id=Y to fetch results
 ```
+
+### Match Flow (API)
+
+```
+UI sends POST /api/match (JD + client_id + job_id)
+    → Returns 202 immediately
+    → Background: matches existing profiles against JD → saves to match_results table
+    → UI calls GET /api/status to fetch results
+```
+
+### Status Response Structure
+
+```json
+{
+  "client_id": "ACME_CORP",
+  "job_id": "JOB-001",
+  "total_results": 5,
+  "results": [
+    {
+      "result_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "file_hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "full_name": "Kumar S Karpuram",
+      "email": "shootmail2kumar@gmail.com",
+      "phone": "+91-96864-88688",
+      "total_experience_years": 17.0,
+      "qualification_percentage": 59.7,
+      "recommendation": "Consider for interview",
+      "reasoning": "Strong match on MLOps, Docker, Kubernetes...",
+      "key_strengths": ["MLOps", "Docker", "Kubernetes"],
+      "missing_skills": ["Scala"],
+      "top_skills": ["Python", "AWS", "Terraform", "Docker", "Kubernetes"],
+      "scoring_breakdown": {
+        "must_have_match": 0.82,
+        "experience_match": 0.75,
+        "skills_depth": 0.68,
+        "project_relevance": 0.45,
+        "recency_factor": 0.90
+      },
+      "matched_at": "2026-07-12T23:30:48Z"
+    }
+  ]
+}
+```
+
+Results are marked as delivered after being returned — subsequent calls only return new/updated results.
 
 ## Embedding Strategy (Multi-Field)
 

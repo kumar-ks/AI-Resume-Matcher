@@ -145,10 +145,9 @@ curl -s http://localhost:8000/api/status
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| `POST` | `/api/ingest` | Upload batch of resumes for async processing |
-| `GET` | `/api/ingest/{task_id}` | Poll ingest task status |
-| `POST` | `/api/match` | Match JD against stored profiles (returns ranked JSON) |
-| `GET` | `/api/status` | DB stats for a client |
+| `POST` | `/api/ingest` | Upload resumes + JD, ingest and match (async) |
+| `POST` | `/api/match` | Upload JD, match existing profiles (async) |
+| `GET` | `/api/status` | Get unsent results for client_id + job_id |
 | `GET` | `/health` | Health check (no auth) |
 
 ### Example API Calls
