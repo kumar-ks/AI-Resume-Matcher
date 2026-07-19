@@ -126,6 +126,54 @@ def _ensure_results_table():
 @app.on_event("startup")
 async def startup():
     _ensure_results_table()
+    _ensure_ollama_running()
+
+
+def _ensure_ollama_running():
+    """Check if Ollama is running. If not, start it automatically."""
+    import shutil
+    import subprocess
+    import time
+
+    model = os.environ.get("MODEL", "ollama/llama3")
+    if not model.startswith("ollama/"):
+        return
+
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        logger.warning("Ollama binary not found. LLM calls will fail.")
+        return
+
+    # Check if already running
+    try:
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            logger.info("Ollama is already running")
+            return
+    except Exception:
+        pass
+
+    # Start it
+    logger.info("Starting Ollama server...")
+    subprocess.Popen(
+        ["ollama", "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # Wait up to 10 seconds
+    for i in range(10):
+        time.sleep(1)
+        try:
+            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                logger.info(f"Ollama started successfully (took {i+1}s)")
+                return
+        except Exception:
+            continue
+
+    logger.warning("Could not start Ollama after 10s. LLM calls may fail.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

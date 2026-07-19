@@ -153,28 +153,90 @@ curl -s http://localhost:8000/api/status
 ### Example API Calls
 
 ```bash
-# Ingest resumes
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. HEALTH CHECK (no auth required)
+# ─────────────────────────────────────────────────────────────────────────────
+curl http://localhost:8000/health
+
+# Response:
+# {"status": "healthy", "service": "ai-resume-matcher"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. INGEST — Upload resumes + JD, ingest and match (async, returns 202)
+# ─────────────────────────────────────────────────────────────────────────────
 curl -X POST http://localhost:8000/api/ingest \
-  -H "X-API-Key: your-key" \
+  -H "X-API-Key: dev-key-change-me" \
   -F "client_id=ACME_CORP" \
   -F "job_id=JOB-001" \
-  -F "files=@resume1.pdf" \
-  -F "files=@resume2.docx"
+  -F "jd_file=@jd/Forward Deployed Engineer.docx" \
+  -F "files=@resumes/Kumar_DevSecOps_MLOps_v1.pdf" \
+  -F "files=@resumes/DevSecOps_MLOps_v3.docx" \
+  -F "files=@resumes/Arun Prasad Resume.pdf"
 
-# Response: {"task_id": "abc-123", "poll_url": "/api/ingest/abc-123"}
+# Response (202 Accepted):
+# {
+#   "message": "Ingest started. 3 resumes + JD queued for processing.",
+#   "client_id": "ACME_CORP",
+#   "job_id": "JOB-001",
+#   "files_received": 3
+# }
 
-# Poll status
-curl http://localhost:8000/api/ingest/abc-123 -H "X-API-Key: your-key"
 
-# Match a JD
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. MATCH — Upload JD only, match against existing profiles (async, returns 202)
+# ─────────────────────────────────────────────────────────────────────────────
 curl -X POST http://localhost:8000/api/match \
-  -H "X-API-Key: your-key" \
+  -H "X-API-Key: dev-key-change-me" \
   -F "client_id=ACME_CORP" \
-  -F "job_id=JOB-001" \
-  -F "jd_file=@job_description.pdf"
+  -F "job_id=JOB-002" \
+  -F "jd_file=@jd/Lead MLOps Engineer.pdf"
 
-# DB status
-curl "http://localhost:8000/api/status?client_id=ACME_CORP" -H "X-API-Key: your-key"
+# Response (202 Accepted):
+# {
+#   "message": "Match started. Results will be available via /api/status.",
+#   "client_id": "ACME_CORP",
+#   "job_id": "JOB-002"
+# }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. STATUS — Get unsent results for a client + job (marks as delivered)
+# ─────────────────────────────────────────────────────────────────────────────
+curl "http://localhost:8000/api/status?client_id=ACME_CORP&job_id=JOB-001" \
+  -H "X-API-Key: dev-key-change-me"
+
+# Response:
+# {
+#   "client_id": "ACME_CORP",
+#   "job_id": "JOB-001",
+#   "total_results": 3,
+#   "results": [
+#     {
+#       "result_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+#       "file_hash": "d41d8cd98f00b204e9800998ecf8427e",
+#       "full_name": "Kumar S Karpuram",
+#       "email": "shootmail2kumar@gmail.com",
+#       "phone": "+91-96864-88688",
+#       "total_experience_years": 17.0,
+#       "qualification_percentage": 59.7,
+#       "recommendation": "Consider for interview",
+#       "reasoning": "Strong DevOps/MLOps match...",
+#       "key_strengths": ["MLOps", "Docker", "Kubernetes"],
+#       "missing_skills": ["Scala"],
+#       "top_skills": ["Python", "AWS", "Terraform", "Docker", "Kubernetes"],
+#       "scoring_breakdown": {
+#         "must_have_match": 0.82,
+#         "experience_match": 0.75,
+#         "skills_depth": 0.68,
+#         "project_relevance": 0.45,
+#         "recency_factor": 0.90
+#       },
+#       "matched_at": "2026-07-19T21:07:04Z"
+#     }
+#   ]
+# }
+# NOTE: Calling /api/status again returns empty results (already delivered).
 ```
 
 ---
