@@ -98,7 +98,7 @@ def _ensure_results_table():
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     client_id TEXT NOT NULL,
                     job_id TEXT NOT NULL,
-                    file_hash TEXT NOT NULL,
+                    resume_file_hash TEXT NOT NULL,
                     full_name TEXT,
                     email TEXT,
                     phone TEXT,
@@ -112,7 +112,7 @@ def _ensure_results_table():
                     scoring_breakdown JSONB DEFAULT '{}',
                     matched_at TIMESTAMPTZ DEFAULT NOW(),
                     is_delivered BOOLEAN DEFAULT FALSE,
-                    UNIQUE(client_id, job_id, file_hash)
+                    UNIQUE(client_id, job_id, resume_file_hash)
                 );
                 CREATE INDEX IF NOT EXISTS idx_results_client_job
                 ON match_results(client_id, job_id);
@@ -413,20 +413,20 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
     db_url = os.environ.get("DATABASE_URL", "postgresql://matcher:matcher_secret@localhost:5432/resume_matcher")
     conn = psycopg.connect(db_url, row_factory=dict_row)
 
-    # Build file_hash lookup
+    # Build resume_file_hash lookup
     hash_lookup = {cand["profile"].raw_text: cand["file_hash"] for cand in candidates}
 
     for r in results:
-        file_hash = hash_lookup.get(r.candidate.raw_text, "")
+        resume_file_hash = hash_lookup.get(r.candidate.raw_text, "")
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO match_results (
-                    client_id, job_id, file_hash, full_name, email, phone,
+                    client_id, job_id, resume_file_hash, full_name, email, phone,
                     total_experience_years, qualification_percentage,
                     recommendation, reasoning, key_strengths, missing_skills,
                     top_skills, scoring_breakdown
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (client_id, job_id, file_hash) DO UPDATE SET
+                ON CONFLICT (client_id, job_id, resume_file_hash) DO UPDATE SET
                     qualification_percentage = EXCLUDED.qualification_percentage,
                     recommendation = EXCLUDED.recommendation,
                     reasoning = EXCLUDED.reasoning,
@@ -437,7 +437,7 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
                     matched_at = NOW(),
                     is_delivered = FALSE
             """, (
-                client_id, job_id, file_hash,
+                client_id, job_id, resume_file_hash,
                 r.candidate.full_name, r.candidate.email, r.candidate.phone,
                 r.candidate.total_experience_years, r.qualification_percentage,
                 r.recommendation, r.reasoning,
@@ -486,7 +486,7 @@ async def get_results(
     # Fetch undelivered results
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, file_hash, full_name, email, phone,
+            SELECT id, resume_file_hash, full_name, email, phone,
                    total_experience_years, qualification_percentage,
                    recommendation, reasoning, key_strengths, missing_skills,
                    top_skills, scoring_breakdown, matched_at
@@ -512,7 +512,7 @@ async def get_results(
         result_ids.append(row["id"])
         results.append({
             "result_id": str(row["id"]),
-            "file_hash": row["file_hash"],
+            "resume_file_hash": row["resume_file_hash"],
             "full_name": row["full_name"],
             "email": row["email"],
             "phone": row["phone"],
@@ -542,6 +542,126 @@ async def get_results(
         "total_results": len(results),
         "results": results,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/template — Upload a DOCX template for a client
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/template", dependencies=[Depends(verify_api_key)])
+async def upload_template(
+    client_id: str = Form(..., description="Client identifier"),
+    template_file: UploadFile = File(..., description="DOCX template file"),
+):
+    """
+    Upload a DOCX template for a client.
+
+    The latest uploaded template always wins — previous templates are replaced.
+    Templates are stored at: data/templates/{client_id}/template.docx
+    """
+    if not client_id or not client_id.strip():
+        raise HTTPException(status_code=400, detail="client_id is required")
+
+    filename = template_file.filename or "template.docx"
+    if not filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Template must be a .docx file")
+
+    # Store template (overwrite existing = latest always wins)
+    template_dir = Path("data/templates") / client_id.strip()
+    template_dir.mkdir(parents=True, exist_ok=True)
+    template_path = template_dir / "template.docx"
+
+    content = await template_file.read()
+    with open(template_path, "wb") as f:
+        f.write(content)
+
+    logger.info(f"Template uploaded for client={client_id}: {template_path}")
+
+    return {
+        "message": "Template uploaded successfully",
+        "client_id": client_id.strip(),
+        "template_file": filename,
+        "stored_at": str(template_path),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/generate-doc — Convert candidate resume into client template
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/generate-doc", dependencies=[Depends(verify_api_key)])
+async def generate_document(
+    client_id: str = Form(..., description="Client identifier"),
+    resume_file_hash: str = Form(..., description="MD5 hash of the candidate's resume file"),
+):
+    """
+    Convert a candidate's profile into the client's DOCX template.
+
+    Requirements:
+        - Client must have uploaded a template via POST /api/template
+        - Candidate must exist in the DB (identified by resume_file_hash)
+
+    Returns:
+        The generated DOCX file as a download.
+    """
+    from fastapi.responses import FileResponse
+    from matching_engine.database import ProfileDatabase
+    from matching_engine.template_renderer import _render_single
+
+    if not client_id or not client_id.strip():
+        raise HTTPException(status_code=400, detail="client_id is required")
+    if not resume_file_hash or not resume_file_hash.strip():
+        raise HTTPException(status_code=400, detail="resume_file_hash is required")
+
+    # Find the client's template
+    template_path = Path("data/templates") / client_id.strip() / "template.docx"
+    if not template_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No template found for client '{client_id}'. Upload one via POST /api/template."
+        )
+
+    # Find the candidate's profile
+    db = ProfileDatabase()
+    all_profiles = db.get_all_profiles_with_metadata(client_id.strip())
+    db.close()
+
+    profile_data = None
+    for p in all_profiles:
+        if p["file_hash"] == resume_file_hash.strip():
+            profile_data = p
+            break
+
+    if not profile_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No profile found with resume_file_hash='{resume_file_hash}' for client '{client_id}'."
+        )
+
+    profile = profile_data["profile"]
+
+    # Generate the document
+    output_dir = Path("data/rendered") / client_id.strip()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Output filename: {candidate_name}_{hash_prefix}.docx
+    safe_name = (profile.full_name or "candidate").replace(" ", "_")
+    output_filename = f"{safe_name}_{resume_file_hash[:8]}.docx"
+    output_path = output_dir / output_filename
+
+    try:
+        _render_single(profile, template_path, output_path)
+    except Exception as e:
+        logger.error(f"Document generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Document generation failed: {str(e)}")
+
+    logger.info(f"Generated doc for {profile.full_name} → {output_path}")
+
+    return FileResponse(
+        path=str(output_path),
+        filename=output_filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

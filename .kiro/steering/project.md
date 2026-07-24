@@ -132,6 +132,8 @@ Generate a key: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
 | `POST` | `/api/ingest` | Yes | Upload resumes + JD, ingest, match, save results (async) |
 | `POST` | `/api/match` | Yes | Upload JD, match existing profiles, save results (async) |
 | `GET` | `/api/status` | Yes | Get unsent results for client_id + job_id |
+| `POST` | `/api/template` | Yes | Upload DOCX template for a client (latest always wins) |
+| `POST` | `/api/generate-doc` | Yes | Convert candidate resume into client's template (returns DOCX file) |
 | `GET` | `/health` | No | Health check |
 
 ### Ingest Flow (API)
@@ -163,7 +165,7 @@ UI sends POST /api/match (JD + client_id + job_id)
   "results": [
     {
       "result_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "file_hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "resume_file_hash": "d41d8cd98f00b204e9800998ecf8427e",
       "full_name": "Kumar S Karpuram",
       "email": "shootmail2kumar@gmail.com",
       "phone": "+91-96864-88688",

@@ -148,6 +148,8 @@ curl -s http://localhost:8000/api/status
 | `POST` | `/api/ingest` | Upload resumes + JD, ingest and match (async) |
 | `POST` | `/api/match` | Upload JD, match existing profiles (async) |
 | `GET` | `/api/status` | Get unsent results for client_id + job_id |
+| `POST` | `/api/template` | Upload DOCX template for a client (latest always wins) |
+| `POST` | `/api/generate-doc` | Convert candidate resume into client's template (returns DOCX) |
 | `GET` | `/health` | Health check (no auth) |
 
 ### Example API Calls
@@ -214,7 +216,7 @@ curl "http://localhost:8000/api/status?client_id=ACME_CORP&job_id=JOB-001" \
 #   "results": [
 #     {
 #       "result_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-#       "file_hash": "d41d8cd98f00b204e9800998ecf8427e",
+#       "resume_file_hash": "d41d8cd98f00b204e9800998ecf8427e",
 #       "full_name": "Kumar S Karpuram",
 #       "email": "shootmail2kumar@gmail.com",
 #       "phone": "+91-96864-88688",
@@ -237,6 +239,79 @@ curl "http://localhost:8000/api/status?client_id=ACME_CORP&job_id=JOB-001" \
 #   ]
 # }
 # NOTE: Calling /api/status again returns empty results (already delivered).
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. TEMPLATE — Upload a DOCX template for a client (latest always wins)
+# ─────────────────────────────────────────────────────────────────────────────
+curl -X POST http://localhost:8000/api/template \
+  -H "X-API-Key: dev-key-change-me" \
+  -F "client_id=ACME_CORP" \
+  -F "template_file=@template/Company_Resume_Template.docx"
+
+# Response:
+# {
+#   "message": "Template uploaded successfully",
+#   "client_id": "ACME_CORP",
+#   "template_file": "Company_Resume_Template.docx"
+# }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. GENERATE-DOC — Convert candidate's resume into the client's template
+# ─────────────────────────────────────────────────────────────────────────────
+curl -X POST http://localhost:8000/api/generate-doc \
+  -H "X-API-Key: dev-key-change-me" \
+  -F "client_id=ACME_CORP" \
+  -F "resume_file_hash=d41d8cd98f00b204e9800998ecf8427e" \
+  --output Kumar_S_Karpuram_d41d8cd9.docx
+
+# Response: Binary DOCX file downloaded
+```
+
+### API Parameter Reference
+
+#### Request Parameters
+
+| Param | Used in | Type | Description |
+|-------|---------|------|-------------|
+| `client_id` | All endpoints | string (required) | Client identifier. Enforces NDA isolation — resumes from one client are never visible to another. |
+| `job_id` | `/api/ingest`, `/api/match`, `/api/status` | string (required) | Job opening identifier. Tracks which job the resumes/results belong to. Resumes within same client are shared across job_ids. |
+| `jd_file` | `/api/ingest`, `/api/match` | file (required) | Job Description document (PDF/DOCX/TXT). Used to extract requirements and match against profiles. |
+| `files` | `/api/ingest` | file[] (required) | One or more resume files (PDF/DOCX/TXT). Each `-F "files=@path"` adds one resume. |
+| `template_file` | `/api/template` | file (required) | DOCX template file. Latest upload replaces previous. Used by `/api/generate-doc` to format candidate resumes. |
+| `resume_file_hash` | `/api/generate-doc` | string (required) | MD5 hash of the candidate's resume file. Identifies which profile to render into the template. Get this from `/api/status` response. |
+| `X-API-Key` | All (except /health) | header (required) | API authentication key. Set via `AI_MATCHER_API_KEYS` env var on server. |
+
+#### Response Fields (`/api/status`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `result_id` | UUID | Unique identifier for this specific match result. Auto-generated per (client_id + job_id + resume) combination. Use this to reference a specific match outcome. |
+| `resume_file_hash` | string (MD5) | MD5 hash of the resume file content. Same file always produces the same hash. **This is the bridge between UI and AI server** — UI computes the same MD5 on its copy to link results back to the original resume. |
+| `full_name` | string | Candidate's extracted full name. |
+| `email` | string | Candidate's email address. |
+| `phone` | string | Candidate's phone number. |
+| `total_experience_years` | float | Total years of professional experience (extracted by LLM). |
+| `qualification_percentage` | float (0-100) | Overall match score against the JD. Higher = better fit. |
+| `recommendation` | string | Action recommendation (e.g., "Consider for interview", "May need additional screening"). |
+| `reasoning` | string | AI-generated explanation of why the candidate scored this way. |
+| `key_strengths` | string[] | Skills/qualities that matched the JD well. |
+| `missing_skills` | string[] | JD requirements the candidate lacks. |
+| `top_skills` | string[] | Candidate's top 10 extracted skills. |
+| `scoring_breakdown` | object | Per-dimension scores (must_have_match, experience_match, skills_depth, project_relevance, recency_factor). Each 0.0–1.0. |
+| `matched_at` | ISO timestamp | When this match was computed. |
+
+#### How `resume_file_hash` bridges UI and AI Server
+
+```
+UI Server:                              AI Server:
+1. User uploads resume.pdf              
+2. UI computes MD5 → "abc123"           
+3. UI stores resume + hash in its DB    
+4. UI sends file to /api/ingest         → AI computes same MD5 → "abc123"
+5. UI calls /api/status                 → AI returns resume_file_hash: "abc123"
+6. UI matches hash to its own record    → LINKED. Same file. No extra API call.
 ```
 
 ---
@@ -249,7 +324,7 @@ Strict client-level data isolation. Resumes for one client can **never** be acce
 |------|-----|
 | Resumes for Client A invisible to Client B | All SQL queries filter by `client_id` |
 | `--client-id` and `--job-id` mandatory | CLI validation exits if missing |
-| Same file can exist under different clients | `UNIQUE(client_id, file_hash)` constraint |
+| Same file can exist under different clients | `UNIQUE(client_id, resume_file_hash)` constraint in match_results |
 | Within same client, resumes shared across jobs | `job_id` for tracking, not isolation |
 
 ```bash
