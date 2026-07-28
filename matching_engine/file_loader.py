@@ -71,8 +71,10 @@ def extract_text(file_path: str | Path) -> str:
         return _read_txt(path)
     elif ext == ".pdf":
         return _read_pdf(path)
-    elif ext in (".docx", ".doc"):
+    elif ext == ".docx":
         return _read_docx(path)
+    elif ext == ".doc":
+        return _read_legacy_doc(path)
     else:
         raise ValueError(
             f"Unsupported file type: {ext}. "
@@ -261,6 +263,82 @@ def _ocr_pdf(path: Path) -> str:
     except Exception as e:
         logger.debug(f"OCR failed for {path.name}: {e}")
         return ""
+
+
+def _read_legacy_doc(path: Path) -> str:
+    """
+    Extract text from legacy .doc files (binary Word format, pre-2007).
+
+    Strategies (tried in order):
+        1. textutil (macOS built-in) — converts .doc to plain text
+        2. libreoffice --headless (Linux/cross-platform) — converts to text
+        3. antiword (if installed) — lightweight .doc parser
+        4. Fallback: try python-docx anyway (works for some .doc files that are actually .docx)
+
+    Called by: extract_text() when file extension is .doc
+    """
+    import subprocess
+    import shutil
+    import tempfile
+
+    text = ""
+
+    # Strategy 1: textutil (macOS)
+    if shutil.which("textutil"):
+        try:
+            result = subprocess.run(
+                ["textutil", "-convert", "txt", "-stdout", str(path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                logger.debug(f"Extracted .doc via textutil: {path.name}")
+                return result.stdout.strip()
+        except Exception as e:
+            logger.debug(f"textutil failed for {path.name}: {e}")
+
+    # Strategy 2: libreoffice (Linux/cross-platform)
+    if shutil.which("libreoffice") or shutil.which("soffice"):
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cmd = shutil.which("libreoffice") or shutil.which("soffice")
+                subprocess.run(
+                    [cmd, "--headless", "--convert-to", "txt:Text", "--outdir", tmpdir, str(path)],
+                    capture_output=True, timeout=60
+                )
+                # Find the output .txt file
+                txt_file = Path(tmpdir) / (path.stem + ".txt")
+                if txt_file.exists():
+                    text = txt_file.read_text(encoding="utf-8", errors="ignore").strip()
+                    if text:
+                        logger.debug(f"Extracted .doc via libreoffice: {path.name}")
+                        return text
+        except Exception as e:
+            logger.debug(f"libreoffice failed for {path.name}: {e}")
+
+    # Strategy 3: antiword
+    if shutil.which("antiword"):
+        try:
+            result = subprocess.run(
+                ["antiword", str(path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                logger.debug(f"Extracted .doc via antiword: {path.name}")
+                return result.stdout.strip()
+        except Exception as e:
+            logger.debug(f"antiword failed for {path.name}: {e}")
+
+    # Strategy 4: Try python-docx anyway (some .doc files are misnamed .docx)
+    try:
+        return _read_docx(path)
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Cannot extract text from .doc file: {path.name}. "
+        f"Install one of: textutil (macOS), libreoffice, or antiword. "
+        f"Or convert to .docx format."
+    )
 
 
 def _read_docx(path: Path) -> str:
