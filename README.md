@@ -563,6 +563,7 @@ AI-Resume-Matcher/
 | `ModuleNotFoundError: psycopg` | `pip install psycopg[binary]` |
 | `connection refused` to PostgreSQL | `docker-compose up -d` (start the container) |
 | `pgvector extension not found` | Use `pgvector/pgvector:pg16` image (already in docker-compose) |
+| `.doc` file fails to ingest | Install `antiword` (Ubuntu: `sudo apt install antiword`) or `libreoffice` |
 | JD returns 0 skills | LLM returned dicts instead of strings — handled by `_normalize_string_list()` |
 | Hallucination false positives | Compound skills are split on delimiters; >50% sub-terms grounded = pass |
 | SSL certificate errors | Handled automatically (patches httpx SSL for Zscaler proxy) |

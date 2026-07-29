@@ -34,9 +34,11 @@ resumes_dir: "./resumes"
 jd_dir: "./jd"
 
 # ── Performance ──────────────────────────────────────────────────────────────
-# concurrency: Resumes processed in parallel
-#   Ollama (local): 2-3 (limited by GPU/CPU)
-#   Cloud APIs:     5-10 (rate limit dependent)
+# concurrency: Resumes processed in parallel (applies to ALL models including Ollama)
+#   Ollama (local):  3-5 (depends on GPU VRAM / CPU cores)
+#   Cloud APIs:      5-10 (rate limit dependent)
+#   Mac M-series:    3-5 (Metal GPU handles concurrent inference well)
+#   Server GPU:      5-10 (depending on VRAM)
 concurrency: 3
 
 # explain_top: Only generate AI explanations for top N candidates

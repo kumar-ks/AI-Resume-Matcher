@@ -99,11 +99,6 @@ class MatchingPipeline:
         self.explainability = ExplainabilityEngine(model=model, temperature=0.3)
 
         # Performance settings
-        # Ollama can only process one request at a time (single GPU inference).
-        # Force concurrency=1 for Ollama to avoid timeouts from queued requests.
-        if model.startswith("ollama/") and concurrency > 1:
-            logger.info(f"Ollama detected — setting concurrency=1 (Ollama processes sequentially)")
-            concurrency = 1
         self.concurrency = concurrency
         self.explain_top_n = explain_top_n
 

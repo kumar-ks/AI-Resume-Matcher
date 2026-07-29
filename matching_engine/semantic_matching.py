@@ -87,42 +87,10 @@ class SemanticMatcher:
             Loaded SentenceTransformer model instance
         """
         if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                import os
-                import httpx
+            from matching_engine.embedding_cache import get_embedding_model
+            self._model = get_embedding_model(self.embedding_model_name)
+            logger.info(f"Loaded embedding model: {self.embedding_model_name}")
 
-                # Disable tokenizers parallelism to avoid issues in async context
-                os.environ["TOKENIZERS_PARALLELISM"] = "false"
-                logger.debug("Set TOKENIZERS_PARALLELISM=false")
-
-                # Workaround for corporate proxy SSL issues (Zscaler etc.)
-                # The httpx client fails with "Cannot send a request, as the client has been closed"
-                # when SSL verification fails. Disable verification for HF Hub downloads.
-                _original_client_init = httpx.Client.__init__
-
-                def _patched_client_init(self_client, *args, **kwargs):
-                    kwargs["verify"] = False
-                    _original_client_init(self_client, *args, **kwargs)
-
-                httpx.Client.__init__ = _patched_client_init
-                logger.debug("Patched httpx.Client to disable SSL verification for model download")
-
-                self._model = SentenceTransformer(self.embedding_model_name)
-
-                # Restore original httpx behavior
-                httpx.Client.__init__ = _original_client_init
-                logger.debug("Restored original httpx.Client behavior")
-
-                # After loading, set offline mode to prevent further HTTP calls
-                os.environ["HF_HUB_OFFLINE"] = "1"
-                logger.info(f"Loaded embedding model: {self.embedding_model_name}")
-            except ImportError:
-                logger.error(
-                    "sentence-transformers not installed. "
-                    "Install with: pip install sentence-transformers"
-                )
-                raise
         return self._model
 
     def match(self, jd: JobDescription, resume: ResumeProfile) -> SemanticMatchResult:

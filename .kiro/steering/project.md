@@ -58,7 +58,7 @@ Two-phase processing: **Ingest** (one-time LLM extraction) and **Match** (fast s
 - **API server:** FastAPI + uvicorn
 - **Auth:** API key via X-API-Key header
 - **Container:** Docker (pgvector/pgvector:pg16 image)
-- **File parsing:** PyPDF2, pdfplumber, python-docx
+- **File parsing:** PyPDF2, pdfplumber, python-docx, textutil/antiword/libreoffice (for .doc)
 - **Config:** YAML (PyYAML)
 - **Async:** asyncio for concurrent processing
 - **Logging:** TimedRotatingFileHandler (daily rollover, 30-day retention)
@@ -319,6 +319,24 @@ SELECT field_type, COUNT(*) FROM resume_embeddings GROUP BY field_type;
 SELECT file_hash, 1-(embedding <=> (SELECT embedding FROM resume_embeddings LIMIT 1)) as sim
 FROM resume_embeddings WHERE field_type='skills' ORDER BY sim DESC LIMIT 5;
 ```
+
+## Supported File Formats
+
+| Format | Handler | Notes |
+|--------|---------|-------|
+| `.pdf` | PyPDF2 + pdfplumber | Falls back to OCR if text extraction fails |
+| `.docx` | python-docx | Extracts paragraphs, tables, text boxes, hyperlinks |
+| `.doc` | textutil (macOS) / antiword / libreoffice (Ubuntu) | Legacy binary Word format |
+| `.txt` | Direct read | UTF-8 with fallback encodings |
+
+For Ubuntu production: `sudo apt install antiword` (lightweight) or `sudo apt install libreoffice` (full).
+
+## API Result Delivery Logic
+
+- `/api/ingest` and `/api/match` save results to `match_results` table with `is_delivered = FALSE`
+- `/api/status` returns only `is_delivered = FALSE` results, then marks them `is_delivered = TRUE`
+- On re-ingest with new resumes: only NEW resume results get `is_delivered = FALSE`
+- Previously delivered results for existing resumes are NOT reset unless their score changes
 
 ## Important Constraints
 

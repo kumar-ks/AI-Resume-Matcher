@@ -143,33 +143,16 @@ class VectorStore:
 
     @property
     def embedding_model(self):
-        """Lazy-load the sentence-transformers model (with SSL fix)."""
+        """Get the cached embedding model (global singleton)."""
         if self._embedding_model is None:
-            import httpx
-            from sentence_transformers import SentenceTransformer
-
-            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-            _original = httpx.Client.__init__
-            def _patched(self_client, *args, **kwargs):
-                kwargs["verify"] = False
-                _original(self_client, *args, **kwargs)
-            httpx.Client.__init__ = _patched
-
-            try:
-                self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-            finally:
-                httpx.Client.__init__ = _original
-
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            logger.info("VectorStore embedding model loaded: all-MiniLM-L6-v2")
-
+            from matching_engine.embedding_cache import get_embedding_model
+            self._embedding_model = get_embedding_model()
         return self._embedding_model
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Compute embeddings using sentence-transformers."""
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
-        return embeddings.tolist()
+        """Compute embeddings using the cached global model."""
+        from matching_engine.embedding_cache import embed_texts
+        return embed_texts(texts)
 
     # ─────────────────────────────────────────────────────────────────────────
     # STORE (MULTI-FIELD)
