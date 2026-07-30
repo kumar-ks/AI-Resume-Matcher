@@ -188,11 +188,21 @@ curl -X POST http://localhost:8000/api/ingest \
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. MATCH — Upload JD only, match against existing profiles (async, returns 202)
 # ─────────────────────────────────────────────────────────────────────────────
+# Fast mode (no LLM explanations, ~30 sec total):
 curl -X POST http://localhost:8000/api/match \
   -H "X-API-Key: dev-key-change-me" \
   -F "client_id=ACME_CORP" \
   -F "job_id=JOB-002" \
-  -F "jd_file=@jd/Lead MLOps Engineer.pdf"
+  -F "jd_file=@jd/Lead MLOps Engineer.pdf" \
+  -F "explain=false"
+
+# Full mode (with LLM explanations, ~2-5 min):
+curl -X POST http://localhost:8000/api/match \
+  -H "X-API-Key: dev-key-change-me" \
+  -F "client_id=ACME_CORP" \
+  -F "job_id=JOB-002" \
+  -F "jd_file=@jd/Lead MLOps Engineer.pdf" \
+  -F "explain=true"
 
 # Response (202 Accepted):
 # {
@@ -279,6 +289,7 @@ curl -X POST http://localhost:8000/api/generate-doc \
 | `job_id` | `/api/ingest`, `/api/match`, `/api/status` | string (required) | Job opening identifier. Tracks which job the resumes/results belong to. Resumes within same client are shared across job_ids. |
 | `jd_file` | `/api/ingest`, `/api/match` | file (required) | Job Description document (PDF/DOCX/TXT). Used to extract requirements and match against profiles. |
 | `files` | `/api/ingest` | file[] (required) | One or more resume files (PDF/DOCX/TXT). Each `-F "files=@path"` adds one resume. |
+| `explain` | `/api/ingest`, `/api/match` | bool (optional, default: true) | If `true`, runs Stage 5 LLM explanations (detailed reasoning, ~20 sec/candidate). If `false`, uses instant rule-based fallback (fast, scores-only). |
 | `template_file` | `/api/template` | file (required) | DOCX template file. Latest upload replaces previous. Used by `/api/generate-doc` to format candidate resumes. |
 | `resume_file_hash` | `/api/generate-doc` | string (required) | MD5 hash of the candidate's resume file. Identifies which profile to render into the template. Get this from `/api/status` response. |
 | `X-API-Key` | All (except /health) | header (required) | API authentication key. Set via `AI_MATCHER_API_KEYS` env var on server. |

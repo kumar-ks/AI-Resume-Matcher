@@ -102,14 +102,20 @@ def _ensure_results_table():
                     full_name TEXT,
                     email TEXT,
                     phone TEXT,
+                    location TEXT,
+                    current_company TEXT,
+                    current_designation TEXT,
                     total_experience_years REAL,
+                    relevant_experience_years REAL,
                     qualification_percentage REAL,
+                    match_label TEXT,
                     recommendation TEXT,
                     reasoning TEXT,
-                    key_strengths JSONB DEFAULT '[]',
+                    score_breakdown JSONB DEFAULT '{}',
+                    matched_skills JSONB DEFAULT '[]',
                     missing_skills JSONB DEFAULT '[]',
                     top_skills JSONB DEFAULT '[]',
-                    scoring_breakdown JSONB DEFAULT '{}',
+                    jd_match_summary JSONB DEFAULT '{}',
                     matched_at TIMESTAMPTZ DEFAULT NOW(),
                     is_delivered BOOLEAN DEFAULT FALSE,
                     UNIQUE(client_id, job_id, resume_file_hash)
@@ -187,10 +193,13 @@ async def ingest_and_match(
     job_id: str = Form(..., description="Job opening identifier"),
     jd_file: UploadFile = File(..., description="Job Description file (PDF/DOCX/TXT)"),
     files: list[UploadFile] = File(..., description="Resume files (PDF/DOCX/TXT)"),
+    explain: bool = Form(True, description="Run Stage 5 LLM explanations (true=detailed but slow, false=fast rule-based)"),
 ):
     """
     Upload resumes + JD. Ingests resumes, matches against JD, saves results.
     Returns immediately (202). Processing runs in background.
+
+    Set explain=false for fast results (skips LLM explanations, uses rule-based fallback).
     """
     if not client_id or not client_id.strip():
         raise HTTPException(status_code=400, detail="client_id is required")
@@ -221,7 +230,7 @@ async def ingest_and_match(
     # Run ingest + match in background
     background_tasks.add_task(
         _background_ingest_and_match,
-        client_id.strip(), job_id.strip(), str(resume_dir), str(jd_path)
+        client_id.strip(), job_id.strip(), str(resume_dir), str(jd_path), explain
     )
 
     return JSONResponse(status_code=202, content={
@@ -232,7 +241,7 @@ async def ingest_and_match(
     })
 
 
-async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: str, jd_path: str):
+async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: str, jd_path: str, explain: bool = True):
     """Background task: ingest resumes, then match against JD, save results."""
     from matching_engine.database import ProfileDatabase
     from matching_engine.vector_store import VectorStore
@@ -260,7 +269,7 @@ async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: 
         # Step 2: Match against JD
         jd_text = extract_text(Path(jd_path))
         if jd_text and jd_text.strip():
-            await _run_match_and_save(client_id, job_id, jd_text)
+            await _run_match_and_save(client_id, job_id, jd_text, explain=explain)
 
     except Exception as e:
         logger.error(f"Background ingest+match failed: {e}")
@@ -276,10 +285,13 @@ async def match_jd(
     client_id: str = Form(..., description="Client identifier (NDA isolation)"),
     job_id: str = Form(..., description="Job opening identifier"),
     jd_file: UploadFile = File(..., description="Job Description file (PDF/DOCX/TXT)"),
+    explain: bool = Form(True, description="Run Stage 5 LLM explanations (true=detailed but slow, false=fast rule-based)"),
 ):
     """
     Match JD against already-ingested profiles. Saves results to DB.
     Returns immediately (202). Processing runs in background.
+
+    Set explain=false for fast results (skips LLM explanations, uses rule-based fallback).
     """
     if not client_id or not client_id.strip():
         raise HTTPException(status_code=400, detail="client_id is required")
@@ -298,7 +310,7 @@ async def match_jd(
 
     # Run match in background
     background_tasks.add_task(
-        _background_match, client_id.strip(), job_id.strip(), str(jd_path)
+        _background_match, client_id.strip(), job_id.strip(), str(jd_path), explain
     )
 
     return JSONResponse(status_code=202, content={
@@ -308,7 +320,7 @@ async def match_jd(
     })
 
 
-async def _background_match(client_id: str, job_id: str, jd_path: str):
+async def _background_match(client_id: str, job_id: str, jd_path: str, explain: bool = True):
     """Background task: match JD against existing profiles, save results."""
     from matching_engine.file_loader import extract_text
 
@@ -328,7 +340,7 @@ async def _background_match(client_id: str, job_id: str, jd_path: str):
 # SHARED: Run matching pipeline and save results to match_results table
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
+async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True):
     """Run the matching pipeline and persist results to match_results table."""
     import psycopg
     from psycopg.rows import dict_row
@@ -389,25 +401,41 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
 
     results.sort(key=lambda r: r.qualification_percentage, reverse=True)
 
-    # Stage 5: Explain top 5
+    # Stage 5: Explanations (conditional on explain flag)
     explainability = ExplainabilityEngine(model=model, temperature=0.3)
-    for result in results[:5]:
-        explanation = await explainability.explain(
-            jd, result.candidate, result.scoring_breakdown, result.semantic_scores
-        )
-        result.key_strengths = explanation.matched_strengths
-        result.missing_skills = explanation.missing_skills
-        result.reasoning = explanation.reason_for_score
-        result.recommendation = explanation.recommendation
 
-    for result in results[5:]:
-        explanation = explainability._fallback_explanation(
-            jd, result.candidate, result.scoring_breakdown
-        )
-        result.key_strengths = explanation.matched_strengths
-        result.missing_skills = explanation.missing_skills
-        result.reasoning = explanation.reason_for_score
-        result.recommendation = explanation.recommendation
+    if explain:
+        # Full LLM explanations for top 5 (slower, ~20 sec per candidate)
+        logger.info(f"Stage 5: Generating LLM explanations for top 5 (explain=true)")
+        for result in results[:5]:
+            explanation = await explainability.explain(
+                jd, result.candidate, result.scoring_breakdown, result.semantic_scores
+            )
+            result.key_strengths = explanation.matched_strengths
+            result.missing_skills = explanation.missing_skills
+            result.reasoning = explanation.reason_for_score
+            result.recommendation = explanation.recommendation
+
+        # Rule-based for the rest
+        for result in results[5:]:
+            explanation = explainability._fallback_explanation(
+                jd, result.candidate, result.scoring_breakdown
+            )
+            result.key_strengths = explanation.matched_strengths
+            result.missing_skills = explanation.missing_skills
+            result.reasoning = explanation.reason_for_score
+            result.recommendation = explanation.recommendation
+    else:
+        # Fast mode: rule-based fallback for ALL candidates (no LLM calls)
+        logger.info(f"Stage 5: Skipped LLM explanations (explain=false, using rule-based)")
+        for result in results:
+            explanation = explainability._fallback_explanation(
+                jd, result.candidate, result.scoring_breakdown
+            )
+            result.key_strengths = explanation.matched_strengths
+            result.missing_skills = explanation.missing_skills
+            result.reasoning = explanation.reason_for_score
+            result.recommendation = explanation.recommendation
 
     # Save results to match_results table
     db_url = os.environ.get("DATABASE_URL", "postgresql://matcher:matcher_secret@localhost:5432/resume_matcher")
@@ -416,40 +444,128 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
     # Build resume_file_hash lookup
     hash_lookup = {cand["profile"].raw_text: cand["file_hash"] for cand in candidates}
 
+    # JD skills for matching analysis
+    jd_must_have = [s.name for s in jd.must_have_skills]
+    jd_good_to_have = [s.name for s in jd.good_to_have_skills]
+    total_jd_skills = len(jd_must_have) + len(jd_good_to_have)
+
     for r in results:
         resume_file_hash = hash_lookup.get(r.candidate.raw_text, "")
+        candidate = r.candidate
+
+        # ── Build matched skills with proficiency ─────────────────────────
+        matched_skills_list = []
+        candidate_skills_lower = {s.lower(): s for s in candidate.skills}
+
+        for jd_skill in jd_must_have + jd_good_to_have:
+            skill_lower = jd_skill.lower()
+            if skill_lower in candidate_skills_lower:
+                # Determine proficiency based on experience mentions
+                proficiency = _infer_proficiency(jd_skill, candidate)
+                matched_skills_list.append({
+                    "skill": jd_skill,
+                    "proficiency": proficiency,
+                    "matched": True,
+                })
+
+        # ── Build missing skills with priority ────────────────────────────
+        missing_skills_list = []
+        for skill in jd_must_have:
+            if skill.lower() not in candidate_skills_lower:
+                missing_skills_list.append({"skill": skill, "priority": "High"})
+        for skill in jd_good_to_have:
+            if skill.lower() not in candidate_skills_lower:
+                missing_skills_list.append({"skill": skill, "priority": "Low"})
+
+        # ── Match label ───────────────────────────────────────────────────
+        pct = r.qualification_percentage
+        if pct >= 75:
+            match_label = "EXCELLENT MATCH"
+        elif pct >= 60:
+            match_label = "GOOD MATCH"
+        elif pct >= 45:
+            match_label = "PARTIAL MATCH"
+        else:
+            match_label = "WEAK MATCH"
+
+        # ── Current company/designation from latest work experience ───────
+        current_company = ""
+        current_designation = ""
+        if candidate.work_experiences:
+            latest = candidate.work_experiences[0]
+            current_company = latest.company or ""
+            current_designation = latest.title or ""
+
+        # ── Relevant experience (years in matching domain) ────────────────
+        relevant_exp = _compute_relevant_experience(candidate, jd)
+
+        # ── JD Match Summary ─────────────────────────────────────────────
+        matched_count = len(matched_skills_list)
+        partially_matched = len([s for s in candidate.skills
+                                 if any(jd_s.lower() in s.lower() or s.lower() in jd_s.lower()
+                                        for jd_s in jd_must_have + jd_good_to_have)]) - matched_count
+        partially_matched = max(0, partially_matched)
+        missing_count = len(missing_skills_list)
+
+        jd_match_summary = {
+            "total_jd_skills": total_jd_skills,
+            "matched_skills": matched_count,
+            "partially_matched": partially_matched,
+            "missing_skills": missing_count,
+            "min_experience_required": jd.experience_range_min,
+            "candidate_experience": candidate.total_experience_years,
+            "candidate_relevant_experience": relevant_exp,
+        }
+
+        # ── Score breakdown (percentage-based for UI) ─────────────────────
+        score_breakdown = {
+            "skills_match": round(r.scoring_breakdown.must_have_match * 100, 1),
+            "experience_match": round(r.scoring_breakdown.experience_match * 100, 1),
+            "skills_depth": round(r.scoring_breakdown.skills_depth * 100, 1),
+            "project_relevance": round(r.scoring_breakdown.project_relevance * 100, 1),
+            "recency_factor": round(r.scoring_breakdown.recency_factor * 100, 1),
+            "overall_fitment": round(r.qualification_percentage, 1),
+        }
+
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO match_results (
                     client_id, job_id, resume_file_hash, full_name, email, phone,
-                    total_experience_years, qualification_percentage,
-                    recommendation, reasoning, key_strengths, missing_skills,
-                    top_skills, scoring_breakdown
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    location, current_company, current_designation,
+                    total_experience_years, relevant_experience_years,
+                    qualification_percentage, match_label,
+                    recommendation, reasoning,
+                    score_breakdown, matched_skills, missing_skills,
+                    top_skills, jd_match_summary
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (client_id, job_id, resume_file_hash) DO UPDATE SET
                     qualification_percentage = EXCLUDED.qualification_percentage,
+                    match_label = EXCLUDED.match_label,
                     recommendation = EXCLUDED.recommendation,
                     reasoning = EXCLUDED.reasoning,
-                    key_strengths = EXCLUDED.key_strengths,
+                    score_breakdown = EXCLUDED.score_breakdown,
+                    matched_skills = EXCLUDED.matched_skills,
                     missing_skills = EXCLUDED.missing_skills,
                     top_skills = EXCLUDED.top_skills,
-                    scoring_breakdown = EXCLUDED.scoring_breakdown,
+                    jd_match_summary = EXCLUDED.jd_match_summary,
+                    location = EXCLUDED.location,
+                    current_company = EXCLUDED.current_company,
+                    current_designation = EXCLUDED.current_designation,
+                    relevant_experience_years = EXCLUDED.relevant_experience_years,
                     matched_at = NOW(),
                     is_delivered = FALSE
             """, (
                 client_id, job_id, resume_file_hash,
-                r.candidate.full_name, r.candidate.email, r.candidate.phone,
-                r.candidate.total_experience_years, r.qualification_percentage,
+                candidate.full_name, candidate.email, candidate.phone,
+                candidate.location, current_company, current_designation,
+                candidate.total_experience_years, relevant_exp,
+                r.qualification_percentage, match_label,
                 r.recommendation, r.reasoning,
-                json.dumps(r.key_strengths), json.dumps(r.missing_skills),
-                json.dumps(r.candidate.skills[:10]),
-                json.dumps({
-                    "must_have_match": round(r.scoring_breakdown.must_have_match, 3),
-                    "experience_match": round(r.scoring_breakdown.experience_match, 3),
-                    "skills_depth": round(r.scoring_breakdown.skills_depth, 3),
-                    "project_relevance": round(r.scoring_breakdown.project_relevance, 3),
-                    "recency_factor": round(r.scoring_breakdown.recency_factor, 3),
-                }),
+                json.dumps(score_breakdown),
+                json.dumps(matched_skills_list),
+                json.dumps(missing_skills_list),
+                json.dumps(candidate.skills[:10]),
+                json.dumps(jd_match_summary),
             ))
     conn.commit()
     conn.close()
@@ -457,6 +573,56 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str):
     vs.close()
 
     logger.info(f"Match complete: {len(results)} results saved for client={client_id}, job={job_id}")
+
+
+def _infer_proficiency(skill: str, candidate) -> str:
+    """Infer proficiency level for a skill based on experience mentions."""
+    skill_lower = skill.lower()
+    mentions = 0
+
+    # Count how many work experiences mention this skill
+    for exp in candidate.work_experiences:
+        techs_lower = [t.lower() for t in exp.technologies]
+        resps_lower = " ".join(exp.responsibilities).lower()
+        if skill_lower in techs_lower or skill_lower in resps_lower:
+            mentions += 1
+
+    # Also check projects
+    for proj in candidate.projects:
+        if skill_lower in [t.lower() for t in proj.technologies]:
+            mentions += 1
+
+    if mentions >= 4:
+        return "Expert"
+    elif mentions >= 2:
+        return "Advanced"
+    elif mentions >= 1:
+        return "Intermediate"
+    else:
+        return "Beginner"
+
+
+def _compute_relevant_experience(candidate, jd) -> float:
+    """Compute years of experience relevant to the JD domain."""
+    jd_domains = set(d.lower() for d in jd.domain_industry)
+    jd_skills = set(s.name.lower() for s in jd.must_have_skills)
+
+    relevant_years = 0.0
+    for exp in candidate.work_experiences:
+        exp_techs = set(t.lower() for t in exp.technologies)
+        exp_domain = (exp.domain or "").lower()
+
+        # Check if this experience is relevant
+        has_domain_match = exp_domain in jd_domains if exp_domain else False
+        has_skill_overlap = bool(exp_techs & jd_skills)
+
+        if has_domain_match or has_skill_overlap:
+            if exp.duration_months:
+                relevant_years += exp.duration_months / 12.0
+            elif exp.start_year and exp.end_year:
+                relevant_years += exp.end_year - exp.start_year
+
+    return round(relevant_years, 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -487,9 +653,12 @@ async def get_results(
     with conn.cursor() as cur:
         cur.execute("""
             SELECT id, resume_file_hash, full_name, email, phone,
-                   total_experience_years, qualification_percentage,
-                   recommendation, reasoning, key_strengths, missing_skills,
-                   top_skills, scoring_breakdown, matched_at
+                   location, current_company, current_designation,
+                   total_experience_years, relevant_experience_years,
+                   qualification_percentage, match_label,
+                   recommendation, reasoning,
+                   score_breakdown, matched_skills, missing_skills,
+                   top_skills, jd_match_summary, matched_at
             FROM match_results
             WHERE client_id = %s AND job_id = %s AND is_delivered = FALSE
             ORDER BY qualification_percentage DESC
@@ -513,17 +682,25 @@ async def get_results(
         results.append({
             "result_id": str(row["id"]),
             "resume_file_hash": row["resume_file_hash"],
-            "full_name": row["full_name"],
-            "email": row["email"],
-            "phone": row["phone"],
-            "total_experience_years": row["total_experience_years"],
-            "qualification_percentage": row["qualification_percentage"],
-            "recommendation": row["recommendation"],
-            "reasoning": row["reasoning"],
-            "key_strengths": row["key_strengths"] if isinstance(row["key_strengths"], list) else json.loads(row["key_strengths"] or "[]"),
+            "summary": {
+                "full_name": row["full_name"],
+                "email": row["email"],
+                "phone": row["phone"],
+                "location": row["location"],
+                "current_company": row["current_company"],
+                "current_designation": row["current_designation"],
+                "total_experience_years": row["total_experience_years"],
+                "relevant_experience_years": row["relevant_experience_years"],
+            },
+            "overall_match_score": row["qualification_percentage"],
+            "match_label": row["match_label"],
+            "score_breakdown": row["score_breakdown"] if isinstance(row["score_breakdown"], dict) else json.loads(row["score_breakdown"] or "{}"),
+            "matched_skills": row["matched_skills"] if isinstance(row["matched_skills"], list) else json.loads(row["matched_skills"] or "[]"),
             "missing_skills": row["missing_skills"] if isinstance(row["missing_skills"], list) else json.loads(row["missing_skills"] or "[]"),
+            "reasoning": row["reasoning"],
+            "recommendation": row["recommendation"],
             "top_skills": row["top_skills"] if isinstance(row["top_skills"], list) else json.loads(row["top_skills"] or "[]"),
-            "scoring_breakdown": row["scoring_breakdown"] if isinstance(row["scoring_breakdown"], dict) else json.loads(row["scoring_breakdown"] or "{}"),
+            "jd_match_summary": row["jd_match_summary"] if isinstance(row["jd_match_summary"], dict) else json.loads(row["jd_match_summary"] or "{}"),
             "matched_at": row["matched_at"].isoformat() if row["matched_at"] else None,
         })
 
