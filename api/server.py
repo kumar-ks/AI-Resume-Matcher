@@ -40,6 +40,7 @@ def _setup_api_logging():
     log_dir = Path(__file__).parent.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "api.log"
+    print(f"[LOGGING] Writing logs to: {log_file.resolve()}")
 
     log_format = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
@@ -242,17 +243,16 @@ async def ingest_and_match(
 
 
 async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: str, jd_path: str, explain: bool = True):
-    """Background task: ingest resumes, then match ONLY NEW resumes against JD, save results."""
+    """Background task: ingest resumes, then match ALL profiles against JD, save results."""
     from matching_engine.database import ProfileDatabase
     from matching_engine.vector_store import VectorStore
     from matching_engine.scanner import scan_and_ingest
     from matching_engine.file_loader import extract_text
 
     try:
-        # Step 1: Get hashes before ingest (to identify what's new)
+        # Step 1: Ingest resumes
         db = ProfileDatabase()
         vs = VectorStore()
-        hashes_before = db.get_ingested_hashes(client_id)
 
         result = await scan_and_ingest(
             resumes_dir=resume_dir,
@@ -264,20 +264,13 @@ async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: 
             temperature=0.1,
         )
         logger.info(f"Ingest done: {result['new_count']} new, {result['skipped_count']} skipped")
-
-        # Step 2: Identify newly ingested hashes
-        hashes_after = db.get_ingested_hashes(client_id)
-        new_hashes = hashes_after - hashes_before
         db.close()
         vs.close()
 
-        # Step 3: Match ONLY new resumes against JD
-        if new_hashes:
-            jd_text = extract_text(Path(jd_path))
-            if jd_text and jd_text.strip():
-                await _run_match_and_save(client_id, job_id, jd_text, explain=explain, only_hashes=new_hashes)
-        else:
-            logger.info("No new resumes ingested, skipping match")
+        # Step 2: Match ALL profiles against JD
+        jd_text = extract_text(Path(jd_path))
+        if jd_text and jd_text.strip():
+            await _run_match_and_save(client_id, job_id, jd_text, explain=explain)
 
     except Exception as e:
         logger.error(f"Background ingest+match failed: {e}")
@@ -348,18 +341,8 @@ async def _background_match(client_id: str, job_id: str, jd_path: str, explain: 
 # SHARED: Run matching pipeline and save results to match_results table
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True, only_hashes: set = None):
-    """
-    Run the matching pipeline and persist results to match_results table.
-
-    Args:
-        client_id: Client identifier
-        job_id: Job identifier
-        jd_text: JD text to match against
-        explain: If True, run LLM explanations (Stage 5). If False, use rule-based.
-        only_hashes: If provided, only match these specific file hashes (for ingest mode).
-                     If None, match ALL profiles for the client (for /api/match mode).
-    """
+async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True):
+    """Run the matching pipeline and persist results to match_results table."""
     import psycopg
     from psycopg.rows import dict_row
     from matching_engine.database import ProfileDatabase
@@ -397,15 +380,6 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
         candidates = [p for p in all_profiles if p["file_hash"] in top_hashes]
     else:
         candidates = db.get_all_profiles_with_metadata(client_id)
-
-    # If only_hashes specified (ingest mode), filter to only new resumes
-    if only_hashes:
-        candidates = [c for c in candidates if c["file_hash"] in only_hashes]
-        if not candidates:
-            logger.info("No new candidates to match after filtering")
-            db.close()
-            vs.close()
-            return
 
     # Stages 3-4: Score
     scorer = Scorer()
@@ -580,12 +554,7 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
                     current_designation = EXCLUDED.current_designation,
                     relevant_experience_years = EXCLUDED.relevant_experience_years,
                     matched_at = NOW(),
-                    is_delivered = CASE
-                        WHEN match_results.is_delivered = TRUE
-                             AND ABS(match_results.qualification_percentage - EXCLUDED.qualification_percentage) < 1.0
-                        THEN TRUE
-                        ELSE FALSE
-                    END
+                    is_delivered = FALSE
             """, (
                 client_id, job_id, resume_file_hash,
                 candidate.full_name, candidate.email, candidate.phone,
@@ -736,13 +705,8 @@ async def get_results(
             "matched_at": row["matched_at"].isoformat() if row["matched_at"] else None,
         })
 
-    # Mark as delivered
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE match_results SET is_delivered = TRUE WHERE id = ANY(%s)",
-            (result_ids,)
-        )
-    conn.commit()
+    # Mark as delivered — REMOVED. UI must explicitly call POST /api/deliver.
+
     conn.close()
 
     return {
@@ -871,6 +835,61 @@ async def generate_document(
         filename=output_filename,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/deliver — Mark results as delivered (called by UI after consuming)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from pydantic import BaseModel as PydanticBaseModel
+from typing import List
+
+
+class DeliverRequest(PydanticBaseModel):
+    client_id: str
+    job_id: str
+    result_ids: List[str]
+
+
+@app.post("/api/deliver", dependencies=[Depends(verify_api_key)])
+async def deliver_results(payload: DeliverRequest):
+    """
+    Mark results as delivered. Called by UI after successfully consuming results.
+
+    Once marked, these results won't appear in subsequent /api/status calls.
+    """
+    if not payload.client_id or not payload.client_id.strip():
+        raise HTTPException(status_code=400, detail="client_id is required")
+    if not payload.job_id or not payload.job_id.strip():
+        raise HTTPException(status_code=400, detail="job_id is required")
+    if not payload.result_ids:
+        raise HTTPException(status_code=400, detail="result_ids list is required")
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    db_url = os.environ.get("DATABASE_URL", "postgresql://matcher:matcher_secret@localhost:5432/resume_matcher")
+    conn = psycopg.connect(db_url, row_factory=dict_row)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE match_results SET is_delivered = TRUE "
+            "WHERE client_id = %s AND job_id = %s AND id = ANY(%s::uuid[])",
+            (payload.client_id.strip(), payload.job_id.strip(), payload.result_ids)
+        )
+        delivered_count = cur.rowcount
+
+    conn.commit()
+    conn.close()
+
+    logger.info(f"/api/deliver: {delivered_count} results marked delivered for client={payload.client_id}, job={payload.job_id}")
+
+    return {
+        "message": f"{delivered_count} results marked as delivered",
+        "client_id": payload.client_id.strip(),
+        "job_id": payload.job_id.strip(),
+        "delivered_count": delivered_count,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

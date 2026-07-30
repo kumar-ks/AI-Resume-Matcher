@@ -145,9 +145,10 @@ curl -s http://localhost:8000/api/status
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| `POST` | `/api/ingest` | Upload resumes + JD, ingest and match (async) |
+| `POST` | `/api/ingest` | Upload resumes + JD, ingest and match ALL profiles (async) |
 | `POST` | `/api/match` | Upload JD, match existing profiles (async) |
-| `GET` | `/api/status` | Get unsent results for client_id + job_id |
+| `GET` | `/api/status` | Get undelivered results for client_id + job_id (read-only, no side effects) |
+| `POST` | `/api/deliver` | Mark results as delivered (UI confirms it consumed them) |
 | `POST` | `/api/template` | Upload DOCX template for a client (latest always wins) |
 | `POST` | `/api/generate-doc` | Convert candidate resume into client's template (returns DOCX) |
 | `GET` | `/health` | Health check (no auth) |
@@ -213,7 +214,7 @@ curl -X POST http://localhost:8000/api/match \
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. STATUS — Get unsent results for a client + job (marks as delivered)
+# 4. STATUS — Get undelivered results (read-only, safe to call multiple times)
 # ─────────────────────────────────────────────────────────────────────────────
 curl "http://localhost:8000/api/status?client_id=ACME_CORP&job_id=JOB-001" \
   -H "X-API-Key: dev-key-change-me"
@@ -227,32 +228,80 @@ curl "http://localhost:8000/api/status?client_id=ACME_CORP&job_id=JOB-001" \
 #     {
 #       "result_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
 #       "resume_file_hash": "d41d8cd98f00b204e9800998ecf8427e",
-#       "full_name": "Kumar S Karpuram",
-#       "email": "shootmail2kumar@gmail.com",
-#       "phone": "+91-96864-88688",
-#       "total_experience_years": 17.0,
-#       "qualification_percentage": 59.7,
-#       "recommendation": "Consider for interview",
-#       "reasoning": "Strong DevOps/MLOps match...",
-#       "key_strengths": ["MLOps", "Docker", "Kubernetes"],
-#       "missing_skills": ["Scala"],
-#       "top_skills": ["Python", "AWS", "Terraform", "Docker", "Kubernetes"],
-#       "scoring_breakdown": {
-#         "must_have_match": 0.82,
-#         "experience_match": 0.75,
-#         "skills_depth": 0.68,
-#         "project_relevance": 0.45,
-#         "recency_factor": 0.90
+#       "summary": {
+#         "full_name": "Kumar S Karpuram",
+#         "email": "shootmail2kumar@gmail.com",
+#         "phone": "+91-96864-88688",
+#         "location": "Bengaluru, India",
+#         "current_company": "XYZ Technologies",
+#         "current_designation": "Senior Software Engineer",
+#         "total_experience_years": 17.0,
+#         "relevant_experience_years": 6.0
 #       },
-#       "matched_at": "2026-07-19T21:07:04Z"
+#       "overall_match_score": 59.7,
+#       "match_label": "PARTIAL MATCH",
+#       "score_breakdown": {
+#         "skills_match": 82.0,
+#         "experience_match": 74.0,
+#         "skills_depth": 68.0,
+#         "project_relevance": 45.0,
+#         "recency_factor": 90.0,
+#         "overall_fitment": 59.7
+#       },
+#       "matched_skills": [
+#         {"skill": "Python", "proficiency": "Expert", "matched": true},
+#         {"skill": "Docker", "proficiency": "Advanced", "matched": true}
+#       ],
+#       "missing_skills": [
+#         {"skill": "Kubernetes", "priority": "High"},
+#         {"skill": "Scala", "priority": "Low"}
+#       ],
+#       "reasoning": "Strong match on MLOps, Docker...",
+#       "recommendation": "Consider for interview",
+#       "top_skills": ["Python", "AWS", "Terraform", "Docker", "Kubernetes"],
+#       "jd_match_summary": {
+#         "total_jd_skills": 22,
+#         "matched_skills": 16,
+#         "partially_matched": 2,
+#         "missing_skills": 4,
+#         "min_experience_required": 5.0,
+#         "candidate_experience": 17.0,
+#         "candidate_relevant_experience": 6.0
+#       },
+#       "matched_at": "2026-07-28T10:54:55Z"
 #     }
 #   ]
 # }
-# NOTE: Calling /api/status again returns empty results (already delivered).
+# NOTE: This is READ-ONLY. Results stay undelivered until UI calls /api/deliver.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. TEMPLATE — Upload a DOCX template for a client (latest always wins)
+# 5. DELIVER — UI confirms it consumed results (marks as delivered)
+# ─────────────────────────────────────────────────────────────────────────────
+curl -X POST http://localhost:8000/api/deliver \
+  -H "X-API-Key: dev-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "ACME_CORP",
+    "job_id": "JOB-001",
+    "result_ids": [
+      "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "b2c3d4e5-f6a7-8901-bcde-f23456789012"
+    ]
+  }'
+
+# Response:
+# {
+#   "message": "2 results marked as delivered",
+#   "client_id": "ACME_CORP",
+#   "job_id": "JOB-001",
+#   "delivered_count": 2
+# }
+# NOTE: Subsequent /api/status calls won't return these delivered results.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. TEMPLATE — Upload a DOCX template for a client (latest always wins)
 # ─────────────────────────────────────────────────────────────────────────────
 curl -X POST http://localhost:8000/api/template \
   -H "X-API-Key: dev-key-change-me" \
@@ -268,7 +317,7 @@ curl -X POST http://localhost:8000/api/template \
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. GENERATE-DOC — Convert candidate's resume into the client's template
+# 7. GENERATE-DOC — Convert candidate's resume into the client's template
 # ─────────────────────────────────────────────────────────────────────────────
 curl -X POST http://localhost:8000/api/generate-doc \
   -H "X-API-Key: dev-key-change-me" \
@@ -292,6 +341,7 @@ curl -X POST http://localhost:8000/api/generate-doc \
 | `explain` | `/api/ingest`, `/api/match` | bool (optional, default: true) | If `true`, runs Stage 5 LLM explanations (detailed reasoning, ~20 sec/candidate). If `false`, uses instant rule-based fallback (fast, scores-only). |
 | `template_file` | `/api/template` | file (required) | DOCX template file. Latest upload replaces previous. Used by `/api/generate-doc` to format candidate resumes. |
 | `resume_file_hash` | `/api/generate-doc` | string (required) | MD5 hash of the candidate's resume file. Identifies which profile to render into the template. Get this from `/api/status` response. |
+| `result_ids` | `/api/deliver` | string[] (required, JSON body) | List of `result_id` UUIDs to mark as delivered. Get these from `/api/status` response. |
 | `X-API-Key` | All (except /health) | header (required) | API authentication key. Set via `AI_MATCHER_API_KEYS` env var on server. |
 
 #### Response Fields (`/api/status`)

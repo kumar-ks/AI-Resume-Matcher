@@ -129,9 +129,10 @@ Generate a key: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
 
 | Method | Endpoint | Auth | Purpose |
 |--------|----------|------|---------|
-| `POST` | `/api/ingest` | Yes | Upload resumes + JD, ingest, match, save results (async) |
+| `POST` | `/api/ingest` | Yes | Upload resumes + JD, ingest, match ALL profiles, save results (async) |
 | `POST` | `/api/match` | Yes | Upload JD, match existing profiles, save results (async) |
-| `GET` | `/api/status` | Yes | Get unsent results for client_id + job_id |
+| `GET` | `/api/status` | Yes | Get undelivered results for client_id + job_id (read-only) |
+| `POST` | `/api/deliver` | Yes | Mark results as delivered (UI confirms consumption) |
 | `POST` | `/api/template` | Yes | Upload DOCX template for a client (latest always wins) |
 | `POST` | `/api/generate-doc` | Yes | Convert candidate resume into client's template (returns DOCX file) |
 | `GET` | `/health` | No | Health check |
