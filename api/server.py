@@ -242,16 +242,17 @@ async def ingest_and_match(
 
 
 async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: str, jd_path: str, explain: bool = True):
-    """Background task: ingest resumes, then match against JD, save results."""
+    """Background task: ingest resumes, then match ONLY NEW resumes against JD, save results."""
     from matching_engine.database import ProfileDatabase
     from matching_engine.vector_store import VectorStore
     from matching_engine.scanner import scan_and_ingest
     from matching_engine.file_loader import extract_text
 
     try:
-        # Step 1: Ingest resumes
+        # Step 1: Get hashes before ingest (to identify what's new)
         db = ProfileDatabase()
         vs = VectorStore()
+        hashes_before = db.get_ingested_hashes(client_id)
 
         result = await scan_and_ingest(
             resumes_dir=resume_dir,
@@ -263,13 +264,20 @@ async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: 
             temperature=0.1,
         )
         logger.info(f"Ingest done: {result['new_count']} new, {result['skipped_count']} skipped")
+
+        # Step 2: Identify newly ingested hashes
+        hashes_after = db.get_ingested_hashes(client_id)
+        new_hashes = hashes_after - hashes_before
         db.close()
         vs.close()
 
-        # Step 2: Match against JD
-        jd_text = extract_text(Path(jd_path))
-        if jd_text and jd_text.strip():
-            await _run_match_and_save(client_id, job_id, jd_text, explain=explain)
+        # Step 3: Match ONLY new resumes against JD
+        if new_hashes:
+            jd_text = extract_text(Path(jd_path))
+            if jd_text and jd_text.strip():
+                await _run_match_and_save(client_id, job_id, jd_text, explain=explain, only_hashes=new_hashes)
+        else:
+            logger.info("No new resumes ingested, skipping match")
 
     except Exception as e:
         logger.error(f"Background ingest+match failed: {e}")
@@ -340,8 +348,18 @@ async def _background_match(client_id: str, job_id: str, jd_path: str, explain: 
 # SHARED: Run matching pipeline and save results to match_results table
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True):
-    """Run the matching pipeline and persist results to match_results table."""
+async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True, only_hashes: set = None):
+    """
+    Run the matching pipeline and persist results to match_results table.
+
+    Args:
+        client_id: Client identifier
+        job_id: Job identifier
+        jd_text: JD text to match against
+        explain: If True, run LLM explanations (Stage 5). If False, use rule-based.
+        only_hashes: If provided, only match these specific file hashes (for ingest mode).
+                     If None, match ALL profiles for the client (for /api/match mode).
+    """
     import psycopg
     from psycopg.rows import dict_row
     from matching_engine.database import ProfileDatabase
@@ -379,6 +397,15 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
         candidates = [p for p in all_profiles if p["file_hash"] in top_hashes]
     else:
         candidates = db.get_all_profiles_with_metadata(client_id)
+
+    # If only_hashes specified (ingest mode), filter to only new resumes
+    if only_hashes:
+        candidates = [c for c in candidates if c["file_hash"] in only_hashes]
+        if not candidates:
+            logger.info("No new candidates to match after filtering")
+            db.close()
+            vs.close()
+            return
 
     # Stages 3-4: Score
     scorer = Scorer()
