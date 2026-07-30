@@ -553,7 +553,12 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
                     current_designation = EXCLUDED.current_designation,
                     relevant_experience_years = EXCLUDED.relevant_experience_years,
                     matched_at = NOW(),
-                    is_delivered = FALSE
+                    is_delivered = CASE
+                        WHEN match_results.is_delivered = TRUE
+                             AND ABS(match_results.qualification_percentage - EXCLUDED.qualification_percentage) < 1.0
+                        THEN TRUE
+                        ELSE FALSE
+                    END
             """, (
                 client_id, job_id, resume_file_hash,
                 candidate.full_name, candidate.email, candidate.phone,
