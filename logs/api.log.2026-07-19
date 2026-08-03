@@ -1,0 +1,101 @@
+2026-07-19 20:48:20 | INFO    | api.server | match_results table verified/created
+2026-07-19 21:05:46 | INFO    | api.server | /api/ingest: 2 resumes + JD for client=ACME_CORP, job=JOB-001
+2026-07-19 21:05:54 | INFO    | matching_engine.database | ProfileDatabase initialized (PostgreSQL)
+2026-07-19 21:05:54 | INFO    | matching_engine.vector_store | VectorStore initialized (PostgreSQL + pgvector)
+2026-07-19 21:05:54 | INFO    | matching_engine.scanner | Scanner found 2 resume files in data/uploads/ACME_CORP/JOB-001/resumes
+2026-07-19 21:05:54 | INFO    | matching_engine.scanner | Scanner: 0 new files to process for client=ACME_CORP, job=JOB-001. 2 already in DB.
+2026-07-19 21:05:54 | INFO    | api.server | Ingest done: 0 new, 2 skipped
+2026-07-19 21:05:55 | INFO    | matching_engine.database | ProfileDatabase initialized (PostgreSQL)
+2026-07-19 21:05:55 | INFO    | matching_engine.vector_store | VectorStore initialized (PostgreSQL + pgvector)
+2026-07-19 21:05:55 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-19 21:05:55 | ERROR   | matching_engine.jd_understanding | JD extraction failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:05:55 | INFO    | matching_engine.jd_understanding | Using fallback keyword extraction for JD
+2026-07-19 21:06:27 | INFO    | numexpr.utils | Note: NumExpr detected 18 cores but "NUMEXPR_MAX_THREADS" not set, so enforcing safe limit of 16.
+2026-07-19 21:06:27 | INFO    | numexpr.utils | NumExpr defaulting to 16 threads.
+2026-07-19 21:06:38 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-19 21:06:48 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-19 21:06:49 | INFO    | matching_engine.vector_store | Hybrid search: 5 results for client=ACME_CORP
+2026-07-19 21:07:00 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-19 21:07:00 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-19 21:07:03 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-19 21:07:03 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:07:03 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:07:03 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-19 21:07:03 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-19 21:07:03 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:07:04 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:07:04 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-19 21:07:04 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:07:04 | ERROR   | matching_engine.explainability | Explainability generation failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Using fallback rule-based explanation
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-19 21:07:04 | ERROR   | matching_engine.explainability | Explainability generation failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Using fallback rule-based explanation
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:07:04 | ERROR   | matching_engine.explainability | Explainability generation failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Using fallback rule-based explanation
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-19 21:07:04 | ERROR   | matching_engine.explainability | Explainability generation failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Using fallback rule-based explanation
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-19 21:07:04 | ERROR   | matching_engine.explainability | Explainability generation failed: litellm.APIConnectionError: OllamaException - Cannot connect to host localhost:11434 ssl:default [Multiple exceptions: [Errno 61] Connect call failed ('::1', 11434, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 11434)]
+2026-07-19 21:07:04 | INFO    | matching_engine.explainability | Using fallback rule-based explanation
+2026-07-19 21:07:04 | INFO    | api.server | Match complete: 5 results saved for client=ACME_CORP, job=JOB-001
+2026-07-19 21:19:29 | INFO    | api.server | match_results table verified/created
+2026-07-19 21:19:31 | INFO    | api.server | Ollama is already running
+2026-07-19 21:19:39 | INFO    | api.server | /api/ingest: 2 resumes + JD for client=ACME_CORP, job=JOB-001
+2026-07-19 21:19:46 | INFO    | matching_engine.database | ProfileDatabase initialized (PostgreSQL)
+2026-07-19 21:19:46 | INFO    | matching_engine.vector_store | VectorStore initialized (PostgreSQL + pgvector)
+2026-07-19 21:19:46 | INFO    | matching_engine.scanner | Scanner found 2 resume files in data/uploads/ACME_CORP/JOB-001/resumes
+2026-07-19 21:19:46 | INFO    | matching_engine.scanner | Scanner: 0 new files to process for client=ACME_CORP, job=JOB-001. 2 already in DB.
+2026-07-19 21:19:46 | INFO    | api.server | Ingest done: 0 new, 2 skipped
+2026-07-19 21:19:47 | INFO    | matching_engine.database | ProfileDatabase initialized (PostgreSQL)
+2026-07-19 21:19:47 | INFO    | matching_engine.vector_store | VectorStore initialized (PostgreSQL + pgvector)
+2026-07-19 21:19:47 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-19 21:20:29 | INFO    | numexpr.utils | Note: NumExpr detected 18 cores but "NUMEXPR_MAX_THREADS" not set, so enforcing safe limit of 16.
+2026-07-19 21:20:29 | INFO    | numexpr.utils | NumExpr defaulting to 16 threads.
+2026-07-19 21:20:42 | WARNING | huggingface_hub.utils._http | Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-19 21:20:53 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-19 21:20:54 | INFO    | matching_engine.vector_store | Hybrid search: 5 results for client=ACME_CORP
+2026-07-19 21:21:05 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-19 21:21:05 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-19 21:21:05 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-19 21:21:07 | INFO    | matching_engine.knowledge_graph | SkillGraph initialized: 148 skills, 158 relationships
+2026-07-19 21:21:07 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:21:07 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:21:07 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-19 21:21:07 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-19 21:21:07 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:21:07 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:21:07 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-19 21:21:07 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-19 21:21:07 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-19 21:21:14 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-19 21:21:21 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:21:28 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-19 21:21:35 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:21:42 | INFO    | api.server | Match complete: 5 results saved for client=ACME_CORP, job=JOB-001
+2026-07-19 21:57:16 | INFO    | api.server | /api/match: JD uploaded for client=ACME_CORP, job=JOB-001
+2026-07-19 21:57:16 | INFO    | matching_engine.database | ProfileDatabase initialized (PostgreSQL)
+2026-07-19 21:57:17 | INFO    | matching_engine.vector_store | VectorStore initialized (PostgreSQL + pgvector)
+2026-07-19 21:57:17 | INFO    | matching_engine.jd_understanding | Stage 1: Extracting JD requirements
+2026-07-19 21:57:49 | INFO    | matching_engine.vector_store | VectorStore embedding model loaded: all-MiniLM-L6-v2
+2026-07-19 21:57:50 | INFO    | matching_engine.vector_store | Hybrid search: 5 results for client=ACME_CORP
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Loaded embedding model: all-MiniLM-L6-v2
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Arun Prasad Sridharan
+2026-07-19 21:58:01 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Arun Prasad Sridharan
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:58:01 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Jyothi Kancharla
+2026-07-19 21:58:01 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Jyothi Kancharla
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S Karpuram
+2026-07-19 21:58:01 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S Karpuram
+2026-07-19 21:58:01 | INFO    | matching_engine.semantic_matching | Stage 3: Semantic matching for Kumar S K
+2026-07-19 21:58:01 | INFO    | matching_engine.scoring | Stage 4: Scoring candidate Kumar S K
+2026-07-19 21:58:01 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Arun Prasad Sridharan
+2026-07-19 21:58:07 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S K
+2026-07-19 21:58:15 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:58:22 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Jyothi Kancharla
+2026-07-19 21:58:29 | INFO    | matching_engine.explainability | Stage 5: Generating explanation for Kumar S Karpuram
+2026-07-19 21:58:35 | INFO    | api.server | Match complete: 5 results saved for client=ACME_CORP, job=JOB-001

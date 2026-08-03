@@ -440,6 +440,32 @@ SELECT file_hash, metadata->>'full_name',
 FROM resume_embeddings
 WHERE to_tsvector('english', content) @@ plainto_tsquery('english', 'kubernetes docker')
 ORDER BY rank DESC;
+
+-- Drop tables 
+docker exec -it resume_matcher_db psql -U matcher -d resume_matcher
+# psql -U matcher -d resume_matcher
+psql (16.14 (Debian 16.14-1.pgdg12+1))
+Type "help" for help.
+
+resume_matcher=# 
+
+SELECT table_schema, table_name 
+FROM information_schema.tables 
+WHERE table_schema = 'public' 
+ORDER BY table_name;
+ table_schema |    table_name     
+--------------+-------------------
+ public       | match_results
+ public       | resume_embeddings
+ public       | resume_profiles
+(3 rows)
+
+resume_matcher=# 
+drop table match_results;
+DROP TABLE
+resume_matcher=# drop table resume_embeddings
+resume_matcher-# drop table resume_profiles
+resume_matcher-# 
 ```
 
 ---

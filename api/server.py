@@ -553,8 +553,7 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
                     current_company = EXCLUDED.current_company,
                     current_designation = EXCLUDED.current_designation,
                     relevant_experience_years = EXCLUDED.relevant_experience_years,
-                    matched_at = NOW(),
-                    is_delivered = FALSE
+                    matched_at = NOW()
             """, (
                 client_id, job_id, resume_file_hash,
                 candidate.full_name, candidate.email, candidate.phone,
