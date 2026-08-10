@@ -30,6 +30,7 @@ from fastapi import FastAPI, File, Form, UploadFile, Depends, HTTPException, Bac
 from fastapi.responses import JSONResponse
 
 from api.auth import verify_api_key
+from matching_engine.observability import create_trace, create_span, end_span, flush
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,8 +250,19 @@ async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: 
     from matching_engine.scanner import scan_and_ingest
     from matching_engine.file_loader import extract_text
 
+    # Create a top-level LangFuse trace for the full ingest+match operation
+    trace = create_trace(
+        name="api-ingest-and-match",
+        client_id=client_id,
+        job_id=job_id,
+        metadata={"resume_dir": resume_dir, "jd_path": jd_path, "explain": explain},
+        tags=["api", "ingest"],
+    )
+
     try:
         # Step 1: Ingest resumes
+        ingest_span = create_span(trace, "ingest-resumes", metadata={"resume_dir": resume_dir})
+
         db = ProfileDatabase()
         vs = VectorStore()
 
@@ -264,16 +276,26 @@ async def _background_ingest_and_match(client_id: str, job_id: str, resume_dir: 
             temperature=0.1,
         )
         logger.info(f"Ingest done: {result['new_count']} new, {result['skipped_count']} skipped")
+
+        end_span(ingest_span, output={
+            "new_count": result["new_count"],
+            "skipped_count": result["skipped_count"],
+            "failed_count": result["failed_count"],
+        })
+
         db.close()
         vs.close()
 
         # Step 2: Match ALL profiles against JD
         jd_text = extract_text(Path(jd_path))
         if jd_text and jd_text.strip():
-            await _run_match_and_save(client_id, job_id, jd_text, explain=explain)
+            await _run_match_and_save(client_id, job_id, jd_text, explain=explain, trace_parent=trace)
 
     except Exception as e:
         logger.error(f"Background ingest+match failed: {e}")
+        end_span(create_span(trace, "error"), level="ERROR", status_message=str(e))
+    finally:
+        flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,23 +347,36 @@ async def _background_match(client_id: str, job_id: str, jd_path: str, explain: 
     """Background task: match JD against existing profiles, save results."""
     from matching_engine.file_loader import extract_text
 
+    # Create a top-level LangFuse trace for the match operation
+    trace = create_trace(
+        name="api-match",
+        client_id=client_id,
+        job_id=job_id,
+        metadata={"jd_path": jd_path, "explain": explain},
+        tags=["api", "match"],
+    )
+
     try:
         jd_text = extract_text(Path(jd_path))
         if not jd_text or not jd_text.strip():
             logger.error(f"Could not extract text from JD: {jd_path}")
+            end_span(create_span(trace, "error"), level="ERROR", status_message="Empty JD text")
             return
 
-        await _run_match_and_save(client_id, job_id, jd_text)
+        await _run_match_and_save(client_id, job_id, jd_text, explain=explain, trace_parent=trace)
 
     except Exception as e:
         logger.error(f"Background match failed: {e}")
+        end_span(create_span(trace, "error"), level="ERROR", status_message=str(e))
+    finally:
+        flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED: Run matching pipeline and save results to match_results table
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True):
+async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain: bool = True, trace_parent=None):
     """Run the matching pipeline and persist results to match_results table."""
     import psycopg
     from psycopg.rows import dict_row
@@ -353,12 +388,20 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
     from matching_engine.explainability import ExplainabilityEngine
     from matching_engine.models import MatchResult, ExplainabilityReport
 
+    # Create a span for the match+save phase
+    match_span = create_span(trace_parent, "match-and-save", metadata={
+        "client_id": client_id,
+        "job_id": job_id,
+        "explain": explain,
+    })
+
     db = ProfileDatabase()
     vs = VectorStore()
 
     profile_count = db.get_profile_count(client_id)
     if profile_count == 0:
         logger.warning(f"No profiles for client={client_id}, skipping match")
+        end_span(match_span, output={"skipped": True, "reason": "no_profiles"})
         db.close()
         vs.close()
         return
@@ -366,7 +409,7 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
     # Stage 1: Extract JD requirements
     model = os.environ.get("MODEL", "ollama/llama3")
     jd_understanding = JDUnderstanding(model=model, temperature=0.1)
-    jd = await jd_understanding.extract(jd_text)
+    jd = await jd_understanding.extract(jd_text, trace_parent=match_span)
     jd.client_id = client_id
     jd.job_id = job_id
 
@@ -410,7 +453,8 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
         logger.info(f"Stage 5: Generating LLM explanations for top 5 (explain=true)")
         for result in results[:5]:
             explanation = await explainability.explain(
-                jd, result.candidate, result.scoring_breakdown, result.semantic_scores
+                jd, result.candidate, result.scoring_breakdown, result.semantic_scores,
+                trace_parent=match_span,
             )
             result.key_strengths = explanation.matched_strengths
             result.missing_skills = explanation.missing_skills
@@ -571,6 +615,12 @@ async def _run_match_and_save(client_id: str, job_id: str, jd_text: str, explain
     conn.close()
     db.close()
     vs.close()
+
+    end_span(match_span, output={
+        "results_count": len(results),
+        "top_score": results[0].qualification_percentage if results else 0,
+        "profile_count": profile_count,
+    })
 
     logger.info(f"Match complete: {len(results)} results saved for client={client_id}, job={job_id}")
 

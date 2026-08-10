@@ -17,6 +17,15 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 python-multipart>=0.0.6
 
+# Observability (LangFuse)
+langfuse>=2.0.0
+
+# LangChain (LLM abstraction, structured output, retry/fallback)
+langchain-core>=0.3.0
+
+# LangGraph (stateful pipeline orchestration, checkpointing)
+langgraph>=0.2.0
+
 # Optional: for OCR support on scanned PDFs
 # Also requires system packages: brew install tesseract poppler
 # pytesseract>=0.3.10

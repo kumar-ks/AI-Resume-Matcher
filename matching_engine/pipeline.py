@@ -35,7 +35,7 @@ USAGE:
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from matching_engine.explainability import ExplainabilityEngine
 from matching_engine.jd_understanding import JDUnderstanding
@@ -43,6 +43,13 @@ from matching_engine.models import (
     JobDescription,
     MatchResult,
     ResumeProfile,
+)
+from matching_engine.observability import (
+    create_trace,
+    create_span,
+    end_span,
+    score_trace,
+    flush,
 )
 from matching_engine.resume_understanding import ResumeUnderstanding
 from matching_engine.scoring import Scorer
@@ -112,6 +119,9 @@ class MatchingPipeline:
         jd_text: str,
         resume_texts: list[str],
         jd: Optional[JobDescription] = None,
+        client_id: str = "",
+        job_id: str = "",
+        trace_parent: Optional[Any] = None,
     ) -> list[MatchResult]:
         """
         Run the full matching pipeline for multiple candidates with concurrency.
@@ -126,6 +136,9 @@ class MatchingPipeline:
             jd_text: Raw job description text
             resume_texts: List of raw resume texts (one per candidate)
             jd: Pre-parsed JobDescription (skips Stage 1 if provided)
+            client_id: Client identifier for LangFuse trace tagging
+            job_id: Job identifier for LangFuse trace tagging
+            trace_parent: Optional external LangFuse trace (from API server)
 
         Returns:
             List of MatchResult sorted by qualification_percentage (highest first)
@@ -136,9 +149,30 @@ class MatchingPipeline:
         start_time = time.time()
         logger.info(f"Starting pipeline: 1 JD x {len(resume_texts)} resumes (concurrency={self.concurrency})")
 
+        # ── Create LangFuse trace for this pipeline run ──────────────────────
+        # If a trace_parent is provided (from API server), use it as the parent.
+        # Otherwise create a new top-level trace.
+        trace = trace_parent or create_trace(
+            name="match-pipeline",
+            client_id=client_id or "cli",
+            job_id=job_id or "unknown",
+            metadata={
+                "resume_count": len(resume_texts),
+                "concurrency": self.concurrency,
+                "explain_top_n": self.explain_top_n,
+            },
+        )
+
         # ── Stage 1: JD Understanding ────────────────────────────────────────
+        jd_span = create_span(trace, "stage-1-jd-understanding", input_data={"jd_text_length": len(jd_text)})
         if jd is None:
-            jd = await self.jd_understanding.extract(jd_text)
+            jd = await self.jd_understanding.extract(jd_text, trace_parent=jd_span)
+        end_span(jd_span, output={
+            "title": jd.title,
+            "must_have_skills_count": len(jd.must_have_skills),
+            "experience_range": f"{jd.experience_range_min}-{jd.experience_range_max}",
+        })
+
         logger.info(f"JD parsed: {jd.title} ({len(jd.must_have_skills)} must-have skills)")
         logger.debug(f"  Must-have skills: {[s.name for s in jd.must_have_skills]}")
         logger.debug(f"  Experience range: {jd.experience_range_min}-{jd.experience_range_max} years")
@@ -149,7 +183,7 @@ class MatchingPipeline:
         async def process_with_limit(idx: int, text: str) -> MatchResult:
             async with semaphore:
                 logger.info(f"Processing resume {idx}/{len(resume_texts)}")
-                return await self._process_single_resume(jd, text)
+                return await self._process_single_resume(jd, text, trace_parent=trace, resume_idx=idx)
 
         tasks = [process_with_limit(i, text) for i, text in enumerate(resume_texts, 1)]
         results: list[MatchResult] = await asyncio.gather(*tasks)
@@ -161,9 +195,12 @@ class MatchingPipeline:
         explain_count = self.explain_top_n or len(results)
         logger.info(f"Generating explanations for top {explain_count} candidates")
 
+        explain_span = create_span(trace, "stage-5-explainability", metadata={"explain_count": explain_count})
+
         for result in results[:explain_count]:
             explanation = await self.explainability.explain(
-                jd, result.candidate, result.scoring_breakdown, result.semantic_scores
+                jd, result.candidate, result.scoring_breakdown, result.semantic_scores,
+                trace_parent=explain_span,
             )
             result.explainability = explanation
             result.key_strengths = explanation.matched_strengths
@@ -182,12 +219,38 @@ class MatchingPipeline:
             result.reasoning = explanation.reason_for_score
             result.recommendation = explanation.recommendation
 
+        end_span(explain_span, output={"explained_count": explain_count})
+
+        # ── Record top score on the trace ────────────────────────────────────
         elapsed = time.time() - start_time
         if results:
+            score_trace(
+                trace,
+                name="top_qualification_percentage",
+                value=results[0].qualification_percentage / 100.0,
+                comment=f"Top candidate: {results[0].candidate.full_name}",
+            )
             logger.info(
                 f"Pipeline complete in {elapsed:.1f}s. Top: "
                 f"{results[0].candidate.full_name} ({results[0].qualification_percentage}%)"
             )
+
+        # Update trace with final metadata
+        if trace and hasattr(trace, "update"):
+            try:
+                trace.update(
+                    metadata={
+                        "elapsed_seconds": round(elapsed, 1),
+                        "resume_count": len(resume_texts),
+                        "top_score": results[0].qualification_percentage if results else 0,
+                    }
+                )
+            except Exception:
+                pass
+
+        # Flush LangFuse events
+        flush()
+
         print(f"\n  ⏱  Pipeline completed in {elapsed:.1f} seconds ({len(resume_texts)} resumes)")
 
         return results
@@ -208,7 +271,8 @@ class MatchingPipeline:
         return results[0]
 
     async def _process_single_resume(
-        self, jd: JobDescription, resume_text: str
+        self, jd: JobDescription, resume_text: str,
+        trace_parent: Optional[Any] = None, resume_idx: int = 0,
     ) -> MatchResult:
         """
         Run stages 2-6 for a single resume against the parsed JD.
@@ -224,13 +288,22 @@ class MatchingPipeline:
         Args:
             jd: Parsed JobDescription from Stage 1
             resume_text: Raw resume text for this candidate
+            trace_parent: Optional LangFuse trace/span for observability
+            resume_idx: Index of this resume in the batch (for labeling)
 
         Returns:
             MatchResult with all scores, explanations, and recommendations
         """
+        # Create a span for this individual resume's processing
+        resume_span = create_span(
+            trace_parent,
+            f"resume-{resume_idx}-processing",
+            metadata={"resume_text_length": len(resume_text)},
+        )
+
         # ── Stage 2: Resume Understanding ────────────────────────────────────
         # Extract structured profile (name, skills, experience, etc.)
-        resume = await self.resume_understanding.extract(resume_text)
+        resume = await self.resume_understanding.extract(resume_text, trace_parent=resume_span)
         logger.info(f"  Resume parsed: {resume.full_name}")
         logger.debug(f"    Skills: {len(resume.skills)} items")
         logger.debug(f"    Experience: {resume.total_experience_years} years")
@@ -261,6 +334,14 @@ class MatchingPipeline:
             f"project={scoring.project_relevance:.2f}, "
             f"recency={scoring.recency_factor:.2f}"
         )
+
+        # End the resume processing span with scoring output
+        end_span(resume_span, output={
+            "candidate_name": resume.full_name,
+            "qualification_percentage": scoring.qualification_percentage,
+            "skills_count": len(resume.skills),
+            "experience_years": resume.total_experience_years,
+        })
 
         # ── Return result (Stage 5 explainability runs later, after sorting) ─
         from matching_engine.models import ExplainabilityReport
@@ -317,3 +398,46 @@ class MatchingPipeline:
 
         results.sort(key=lambda r: r.qualification_percentage, reverse=True)
         return results
+
+    async def match_with_graph(
+        self,
+        jd_text: str,
+        resume_texts: list[str],
+        client_id: str = "",
+        job_id: str = "",
+        thread_id: Optional[str] = None,
+    ) -> list[MatchResult]:
+        """
+        Run the matching pipeline using the LangGraph state machine.
+
+        This is the graph-based alternative to match(). It provides:
+          - Checkpointed state (crash recovery)
+          - Conditional routing (skip explanations for low scorers)
+          - Clean separation of orchestration from business logic
+
+        The graph delegates to the same stage engines (JDUnderstanding,
+        ResumeUnderstanding, SemanticMatcher, Scorer, ExplainabilityEngine).
+
+        Args:
+            jd_text: Raw job description text
+            resume_texts: List of raw resume texts
+            client_id: Client identifier for tracing
+            job_id: Job identifier for tracing
+            thread_id: Optional thread ID for checkpointed resumption
+
+        Returns:
+            List of MatchResult sorted by qualification_percentage (descending)
+        """
+        from matching_engine.graph import run_matching_graph
+
+        return await run_matching_graph(
+            jd_text=jd_text,
+            resume_texts=resume_texts,
+            client_id=client_id,
+            job_id=job_id,
+            model=self.jd_understanding.model,
+            temperature=self.jd_understanding.temperature,
+            concurrency=self.concurrency,
+            explain_top_n=self.explain_top_n,
+            thread_id=thread_id,
+        )

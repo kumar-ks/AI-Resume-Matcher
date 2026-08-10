@@ -7,113 +7,51 @@ PURPOSE:
     Identifies must-have skills, good-to-have skills, experience range,
     education requirements, domain/industry, and certifications.
 
+IMPLEMENTATION:
+    Uses a LangChain chain (prompt → LLM → PydanticOutputParser) for structured
+    extraction with automatic retry on parse failures. Falls back to keyword-based
+    extraction if the chain fails entirely.
+
 CALL HIERARCHY:
     Called by:
         - pipeline.py → calls JDUnderstanding.extract() as Stage 1 of the matching pipeline
     Calls internally:
-        - litellm.acompletion() → sends JD text to LLM for structured extraction
-        - _extract_json() → parses raw LLM response text into a Python dict
-        - _try_parse_json() → attempts JSON parsing with fixups for common LLM issues
-        - _parse_response() → converts parsed dict into a JobDescription model
+        - create_jd_chain() → LangChain chain (prompt | ChatLiteLLMModel | PydanticOutputParser)
+        - _convert_chain_output() → maps JDExtractionOutput → JobDescription
         - _parse_role_level() → maps string role level to ExperienceLevel enum
-        - _fallback_extraction() → provides minimal extraction when LLM fails
+        - _fallback_extraction() → provides minimal extraction when chain fails
 
 RETURNS:
     JobDescription model with all extracted fields populated (title, skills,
     experience range, education, domain, certifications, responsibilities, etc.)
-
-FLOW:
-    1. Receive raw JD text from pipeline.py
-    2. Format the extraction prompt with the JD text
-    3. Send prompt to LLM via litellm.acompletion()
-    4. Parse LLM response JSON (with multiple fallback strategies)
-    5. Map parsed data to JobDescription model
-    6. Return structured JobDescription to pipeline.py
 """
 
-import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
-import litellm
-
+from matching_engine.chains.factory import get_llm_for_stage
+from matching_engine.chains.jd_chain import JDExtractionOutput, create_jd_chain
 from matching_engine.models import (
     ExperienceLevel,
     JobDescription,
     Skill,
     SkillCategory,
 )
-from matching_engine.utils import extract_json_from_llm_response
+from matching_engine.observability import (
+    create_generation,
+    end_generation,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_string_list(items: list) -> list[str]:
-    """
-    Normalize a list that should contain strings but may contain dicts from LLM.
-
-    Handles cases where LLM returns:
-        - [{"name": "value"}, ...] instead of ["value", ...]
-        - [{"description": "value"}, ...]
-        - Mixed types
-    """
-    if not items:
-        return []
-
-    result = []
-    for item in items:
-        if isinstance(item, str):
-            result.append(item)
-        elif isinstance(item, dict):
-            for key in ("name", "description", "text", "value", "responsibility", "item"):
-                if key in item:
-                    result.append(str(item[key]))
-                    break
-            else:
-                vals = [str(v) for v in item.values() if v]
-                if vals:
-                    result.append("; ".join(vals))
-        else:
-            result.append(str(item))
-    return result
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM PROMPT TEMPLATE
-# ─────────────────────────────────────────────────────────────────────────────
-# This prompt instructs the LLM to act as an HR analyst and return structured
-# JSON with all key fields extracted from the raw job description text.
-# The double-braces {{ }} are used to escape Python's .format() method.
-JD_EXTRACTION_PROMPT = """You are an expert HR analyst. Analyze the following job description and extract structured information.
-
-Return a JSON object with these fields:
-{{
-    "title": "Job title",
-    "must_have_skills": [{{"name": "skill name", "years_required": null or number}}],
-    "good_to_have_skills": [{{"name": "skill name", "years_required": null or number}}],
-    "experience_range_min": minimum years or null,
-    "experience_range_max": maximum years or null,
-    "education": ["degree requirements"],
-    "domain_industry": ["relevant domains/industries"],
-    "certifications": ["required or preferred certifications"],
-    "responsibilities": ["key responsibilities"],
-    "location": "location or null",
-    "role_level": "entry|mid|senior|lead|principal"
-}}
-
-Job Description:
----
-{jd_text}
----
-
-Return ONLY valid JSON, no markdown formatting."""
 
 
 class JDUnderstanding:
     """
     Parses raw job description text into a structured JobDescription model.
 
-    Uses an LLM to extract key requirements including skills (must-have vs
-    good-to-have), experience range, education, domain, and certifications.
+    Uses a LangChain chain with PydanticOutputParser to extract key requirements
+    including skills (must-have vs good-to-have), experience range, education,
+    domain, and certifications.
 
     This is the entry point for Stage 1 of the matching pipeline.
     pipeline.py instantiates this class and calls extract() with raw JD text.
@@ -131,25 +69,37 @@ class JDUnderstanding:
         """
         self.model = model
         self.temperature = temperature
+        self._trace_parent: Optional[Any] = None  # Set by pipeline for LangFuse tracing
+
+        # Create the LangChain chain (prompt → LLM → PydanticOutputParser with retry)
+        # Uses factory to get the right LLM (local or Bi-Frost gateway)
+        llm = get_llm_for_stage("jd", model=model, temperature=temperature)
+        self._chain = create_jd_chain(
+            model=model,
+            temperature=temperature,
+            max_tokens=4096,
+            timeout=300,
+            max_retries=2,
+            llm=llm,
+        )
+
         logger.debug(f"JDUnderstanding initialized with model={model}, temperature={temperature}")
 
-    async def extract(self, jd_text: str) -> JobDescription:
+    async def extract(self, jd_text: str, trace_parent: Optional[Any] = None) -> JobDescription:
         """
         Extract structured requirements from raw JD text.
 
         Called by: pipeline.py as Stage 1 of the matching pipeline.
-        Calls: litellm.acompletion(), _extract_json(), _parse_response(), _fallback_extraction()
 
         Flow:
             1. Validate input text is not empty
-            2. Format the extraction prompt with JD text
-            3. Call LLM via litellm.acompletion()
-            4. Extract JSON from LLM response
-            5. Parse JSON into JobDescription model
-            6. On failure, fall back to keyword-based extraction
+            2. Invoke LangChain chain with jd_text (includes retry on parse failure)
+            3. Convert chain output (JDExtractionOutput) → JobDescription
+            4. On failure, fall back to keyword-based extraction
 
         Args:
             jd_text: Raw job description text (from PDF/DOCX/plain text)
+            trace_parent: Optional LangFuse span/trace for observability
 
         Returns:
             JobDescription with all extracted fields populated
@@ -157,103 +107,94 @@ class JDUnderstanding:
         logger.info("Stage 1: Extracting JD requirements")
         logger.debug(f"JD text length: {len(jd_text)} characters")
 
+        # Use explicitly passed parent, or fall back to instance-level parent
+        parent = trace_parent or self._trace_parent
+
         # Guard clause: if JD text is empty/whitespace, return empty model
         if not jd_text.strip():
             logger.warning("Empty JD text provided")
             return JobDescription(raw_text=jd_text)
 
+        # Create LangFuse generation span for observability
+        generation = create_generation(
+            parent=parent,
+            name="jd-extraction-chain",
+            model=self.model,
+            input_data={"jd_text_length": len(jd_text)},
+            model_parameters={"temperature": self.temperature, "max_tokens": 4096},
+            metadata={"method": "langchain_chain"},
+        )
+
         try:
-            # ── Step 1: Call LLM with the extraction prompt ──
-            logger.debug(f"Sending JD extraction request to model: {self.model}")
-            response = await litellm.acompletion(
-                model=self.model,
-                messages=[
-                    {"role": "user", "content": JD_EXTRACTION_PROMPT.format(jd_text=jd_text)}
-                ],
-                temperature=self.temperature,
-                max_tokens=4096,
-                timeout=300,  # 5 min — allows for Ollama cold start + generation
+            # Invoke the LangChain chain (prompt → LLM → PydanticOutputParser)
+            # The chain handles retries internally on parse failures
+            logger.debug(f"Invoking JD chain with model: {self.model}")
+            result: JDExtractionOutput = await self._chain.ainvoke({"jd_text": jd_text})
+
+            logger.debug(f"Chain returned: title='{result.title}', skills={len(result.must_have_skills)}")
+
+            # End generation with success
+            end_generation(
+                generation,
+                output=result.model_dump(),
             )
 
-            # ── Step 2: Extract raw content from LLM response ──
-            content = response.choices[0].message.content
-            logger.debug(f"LLM response received, content length: {len(content) if content else 0}")
+            # Convert chain output to pipeline's JobDescription model
+            return self._convert_chain_output(result, jd_text)
 
-            # ── Step 3: Parse JSON from the response content ──
-            data = extract_json_from_llm_response(content)
-            if data is None:
-                logger.error("Could not extract valid JSON from LLM response for JD")
-                return self._fallback_extraction(jd_text)
-
-            # ── Step 4: Convert parsed dict to JobDescription model ──
-            logger.debug(f"Successfully parsed JD JSON with keys: {list(data.keys())}")
-            return self._parse_response(data, jd_text)
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            return self._fallback_extraction(jd_text)
         except Exception as e:
-            logger.error(f"JD extraction failed: {e}")
+            logger.error(f"JD extraction chain failed: {e}")
+            end_generation(generation, level="ERROR", status_message=str(e))
             return self._fallback_extraction(jd_text)
 
-    def _parse_response(self, data: dict, raw_text: str) -> JobDescription:
+    def _convert_chain_output(self, output: JDExtractionOutput, raw_text: str) -> JobDescription:
         """
-        Parse LLM JSON response into JobDescription model.
+        Convert LangChain chain output (JDExtractionOutput) to pipeline's JobDescription model.
 
-        Called by: extract()
-        Calls: _parse_role_level()
-
-        Maps the flat JSON dict from the LLM into the structured JobDescription
-        Pydantic model, converting skill dicts into Skill objects with categories.
+        Maps the Pydantic output model from the chain into the full JobDescription
+        model used by downstream pipeline stages.
 
         Args:
-            data: Parsed JSON dict from LLM response
+            output: Parsed JDExtractionOutput from the chain
             raw_text: Original raw JD text (preserved in the model)
 
         Returns:
             Fully populated JobDescription model
         """
-        logger.debug(f"Parsing JD response: title='{data.get('title', '')}'")
+        logger.debug(f"Converting chain output: title='{output.title}'")
 
-        # ── Parse must-have skills into Skill objects ──
-        # Each skill can be a dict {"name": ..., "years_required": ...} or a plain string
+        # Convert skill output models to pipeline Skill objects
         must_have = [
             Skill(
-                name=s.get("name", "") if isinstance(s, dict) else str(s),
+                name=s.name,
                 category=SkillCategory.MUST_HAVE,
-                years_required=s.get("years_required") if isinstance(s, dict) else None,
+                years_required=s.years_required,
             )
-            for s in data.get("must_have_skills", [])
+            for s in output.must_have_skills
         ]
-        logger.debug(f"Extracted {len(must_have)} must-have skills")
 
-        # ── Parse good-to-have skills into Skill objects ──
         good_to_have = [
             Skill(
-                name=s.get("name", "") if isinstance(s, dict) else str(s),
+                name=s.name,
                 category=SkillCategory.GOOD_TO_HAVE,
-                years_required=s.get("years_required") if isinstance(s, dict) else None,
+                years_required=s.years_required,
             )
-            for s in data.get("good_to_have_skills", [])
+            for s in output.good_to_have_skills
         ]
-        logger.debug(f"Extracted {len(good_to_have)} good-to-have skills")
 
-        # ── Parse role level string to enum ──
-        role_level = self._parse_role_level(data.get("role_level"))
-        logger.debug(f"Parsed role level: {role_level}")
+        role_level = self._parse_role_level(output.role_level)
 
-        # ── Assemble and return the JobDescription model ──
         return JobDescription(
-            title=data.get("title", ""),
+            title=output.title,
             must_have_skills=must_have,
             good_to_have_skills=good_to_have,
-            experience_range_min=data.get("experience_range_min"),
-            experience_range_max=data.get("experience_range_max"),
-            education=_normalize_string_list(data.get("education", [])),
-            domain_industry=_normalize_string_list(data.get("domain_industry", [])),
-            certifications=_normalize_string_list(data.get("certifications", [])),
-            responsibilities=_normalize_string_list(data.get("responsibilities", [])),
-            location=data.get("location"),
+            experience_range_min=output.experience_range_min,
+            experience_range_max=output.experience_range_max,
+            education=output.education,
+            domain_industry=output.domain_industry,
+            certifications=output.certifications,
+            responsibilities=output.responsibilities,
+            location=output.location,
             role_level=role_level,
             raw_text=raw_text,
         )
@@ -262,8 +203,6 @@ class JDUnderstanding:
         """
         Map string role level to ExperienceLevel enum.
 
-        Called by: _parse_response()
-
         Args:
             level: String like "entry", "mid", "senior", "lead", "principal"
 
@@ -271,7 +210,6 @@ class JDUnderstanding:
             Corresponding ExperienceLevel enum value, or None if not recognized
         """
         if not level:
-            logger.debug("No role level provided, returning None")
             return None
 
         mapping = {
@@ -281,15 +219,11 @@ class JDUnderstanding:
             "lead": ExperienceLevel.LEAD,
             "principal": ExperienceLevel.PRINCIPAL,
         }
-        result = mapping.get(level.lower())
-        logger.debug(f"Role level '{level}' mapped to: {result}")
-        return result
+        return mapping.get(level.lower())
 
     def _fallback_extraction(self, jd_text: str) -> JobDescription:
         """
-        Basic keyword-based extraction when LLM fails.
-
-        Called by: extract() when LLM call or JSON parsing fails.
+        Basic keyword-based extraction when the LangChain chain fails.
 
         Provides a minimal extraction using simple heuristics.
         The raw_text is preserved so downstream stages can still
@@ -302,5 +236,4 @@ class JDUnderstanding:
             Minimal JobDescription with only raw_text populated
         """
         logger.info("Using fallback keyword extraction for JD")
-        logger.debug(f"Fallback triggered, preserving raw text of {len(jd_text)} chars")
         return JobDescription(raw_text=jd_text)

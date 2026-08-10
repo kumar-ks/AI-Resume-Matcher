@@ -70,8 +70,73 @@ db_path: "./data/profiles.db"              # SQLite profile storage
 vector_store_path: "./data/chroma"         # ChromaDB embedding storage
 scanned_files_path: "./data/scanned_files" # Copies of processed resumes
 
+# ── Pipeline Execution Mode ──────────────────────────────────────────────────
+# Controls how the matching pipeline is orchestrated.
+#   "linear"   — Classic sequential pipeline (MatchingPipeline.match())
+#   "graph"    — LangGraph state machine with checkpointing + conditional routing
+# The graph mode provides crash recovery and streaming progress.
+pipeline_mode: "linear"
+
 # scan_mode controls how matching finds candidates:
 #   "db_first"    — Search DB first, then scan folder for new files (DEFAULT)
 #   "folder_only" — Bypass DB, scan folder directly (fresh extraction every time)
 #   "db_only"     — Only use DB, never scan folder (fastest)
 scan_mode: "db_first"
+
+# ── LangChain Settings ────────────────────────────────────────────────────────
+# Controls for the LangChain chain layer (prompt → LLM → PydanticOutputParser).
+# These settings apply to all chain-based LLM calls (Stages 1, 2, 5).
+langchain:
+  # max_retries: How many times to retry if the output parser fails to parse
+  #   LLM response. Each retry re-invokes the full chain (prompt + LLM + parse).
+  #   0 = no retries (fail immediately), 2 = recommended for local models
+  max_retries: 2
+
+  # timeout: LLM call timeout in seconds (per attempt, not total)
+  #   Ollama cold-start can take 30-60s on first call; set generously.
+  timeout: 300
+
+  # explainability_temperature: Temperature specifically for Stage 5 explanations.
+  #   Slightly higher than extraction stages for more natural language.
+  explainability_temperature: 0.3
+
+# ── Bi-Frost Gateway (BT GenAI Gateway) ──────────────────────────────────────
+# Routes LLM calls through BT's enterprise AI gateway for governance,
+# compliance, centralized auth, and model access management.
+#
+# When enabled, the gateway provides:
+#   - Access to enterprise-approved models (Claude, GPT-4, etc.)
+#   - Centralized cost tracking and quota management
+#   - Content filtering and compliance guardrails
+#   - Audit trail for all AI interactions
+#
+# Set credentials via environment variables (see .env.example).
+# If BIFROST_BASE_URL is not set, all calls go directly to litellm (local/cloud).
+bifrost:
+  enabled: false          # Set to true when gateway credentials are configured
+
+  # PII routing: Which stages can send data through the gateway?
+  #   "default" — JD + Explainability through gateway, Resume stays local (PII)
+  #   "all"     — All stages go through gateway (only if gateway handles PII)
+  #   "none"    — All stages stay local (gateway disabled for LLM calls)
+  pii_routing: "default"
+
+  # default_model: Model to request from the gateway (overrides top-level 'model')
+  #   The gateway maps this to the actual provider (Anthropic/OpenAI/Bedrock)
+  # default_model: "anthropic/claude-3-sonnet"
+
+  # Metadata sent with every request for cost attribution
+  # project_id: "ai-resume-matcher"
+  # cost_center: ""
+  # use_case: "recruitment-automation"
+
+# ── Observability (LangFuse) ─────────────────────────────────────────────────
+# LangFuse provides tracing, cost tracking, and quality monitoring for LLM calls.
+# Set credentials via environment variables (see .env).
+# Set enabled to false to disable tracing even if keys are present.
+#
+# Dashboard: https://cloud.langfuse.com (or self-hosted URL)
+# Docs: https://langfuse.com/docs
+langfuse:
+  enabled: true           # Set to false to disable tracing
+  # host: "https://cloud.langfuse.com"  # Override for self-hosted instances
